@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(name = "so-delink", version, about = "Split a debug .so into .o files")]
+#[command(name = "so-delink", version, about = "Split a debug .so or .exe into .o/.obj files")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -64,6 +64,42 @@ enum Cmd {
         #[arg(long)]
         per_function_sections: bool,
     },
+
+    // -----------------------------------------------------------------------
+    // Windows PE + PDB subcommands
+    // -----------------------------------------------------------------------
+
+    /// Inspect a Windows PE (.exe) and its PDB: print sections, imports, and CU list.
+    PeInspect {
+        /// Path to the PE executable (.exe or .dll).
+        input: PathBuf,
+        /// Path to the matching PDB file.
+        #[arg(long)]
+        pdb: PathBuf,
+    },
+
+    /// List PDB modules (CUs) sorted by .text size.
+    PeListCus {
+        input: PathBuf,
+        #[arg(long)]
+        pdb: PathBuf,
+        #[arg(long, default_value = "")]
+        contains: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+
+    /// Split a PE + PDB into one COFF `.obj` per module plus `__shared_data.obj`.
+    PeSplit {
+        /// Path to the PE executable (.exe or .dll).
+        input: PathBuf,
+        /// Path to the matching PDB file.
+        #[arg(long)]
+        pdb: PathBuf,
+        /// Output directory for the `.obj` files.
+        #[arg(short, long)]
+        outdir: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -96,6 +132,11 @@ fn main() -> Result<()> {
             dwarf,
             per_function_sections,
         } => cmd_split(&input, &outdir, comdat, dwarf, per_function_sections),
+        Cmd::PeInspect { input, pdb } => cmd_pe_inspect(&input, &pdb),
+        Cmd::PeListCus { input, pdb, contains, limit } => {
+            cmd_pe_list_cus(&input, &pdb, &contains, limit)
+        }
+        Cmd::PeSplit { input, pdb, outdir } => cmd_pe_split(&input, &pdb, &outdir),
     }
 }
 
@@ -398,5 +439,123 @@ fn cmd_list_cus(path: &Path, contains: &str, limit: usize) -> Result<()> {
     for (bytes, funcs, name) in rows.iter().take(limit) {
         println!("{:>10} {:>6}  {}", bytes, funcs, name);
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// PE + PDB subcommands
+// ---------------------------------------------------------------------------
+
+fn load_pe_context(exe_path: &Path, pdb_path: &Path) -> Result<delink_pe::PeContext> {
+    let exe_data = std::fs::read(exe_path)
+        .with_context(|| format!("read {}", exe_path.display()))?;
+    let pdb_data = std::fs::read(pdb_path)
+        .with_context(|| format!("read {}", pdb_path.display()))?;
+    tracing::info!(
+        "loaded PE ({} bytes) + PDB ({} bytes)",
+        exe_data.len(),
+        pdb_data.len()
+    );
+    delink_pe::load_pe_and_pdb(&exe_data, &pdb_data)
+        .with_context(|| format!("load {} + {}", exe_path.display(), pdb_path.display()))
+}
+
+fn cmd_pe_inspect(exe_path: &Path, pdb_path: &Path) -> Result<()> {
+    let pe = load_pe_context(exe_path, pdb_path)?;
+
+    println!("PE sections:");
+    println!("  {:<16} {:>16} {:>12}  flags", "name", "VA", "size");
+    for s in &pe.sections {
+        println!(
+            "  {:<16} {:#016x} {:>12}  0x{:08x}",
+            s.name, s.va, s.virtual_size, s.characteristics
+        );
+    }
+
+    println!("\nBase relocations: {} entries", pe.base_relocations.len());
+    let dir64 = pe.base_relocations.iter().filter(|r| matches!(r.kind, delink_pe::BaseRelocKind::Dir64)).count();
+    println!("  DIR64: {}  other: {}", dir64, pe.base_relocations.len() - dir64);
+
+    println!("\nImports: {} IAT entries", pe.imports.len());
+
+    println!("\nPDB modules (CUs): {}", pe.cu_index.units.len());
+    let total_funcs: usize = pe.cu_index.units.iter().map(|u| u.functions.len()).sum();
+    println!("  total functions: {}", total_funcs);
+
+    Ok(())
+}
+
+fn cmd_pe_list_cus(
+    exe_path: &Path,
+    pdb_path: &Path,
+    contains: &str,
+    limit: usize,
+) -> Result<()> {
+    let pe = load_pe_context(exe_path, pdb_path)?;
+
+    let mut rows: Vec<_> = pe
+        .cu_index
+        .units
+        .iter()
+        .filter(|u| u.name.contains(contains))
+        .map(|u| (u.text_size(), u.functions.len(), u.name.clone()))
+        .collect();
+    rows.sort_by_key(|(b, _, _)| *b);
+
+    println!("{:>10} {:>6}  {}", "text bytes", "funcs", "name");
+    for (bytes, funcs, name) in rows.iter().take(limit) {
+        println!("{:>10} {:>6}  {}", bytes, funcs, name);
+    }
+    Ok(())
+}
+
+fn cmd_pe_split(exe_path: &Path, pdb_path: &Path, outdir: &Path) -> Result<()> {
+    let pe = load_pe_context(exe_path, pdb_path)?;
+
+    tracing::info!(
+        "splitting {} CUs (modules with functions) in parallel",
+        pe.cu_index.units.iter().filter(|u| u.functions.iter().any(|f| f.size > 0)).count()
+    );
+
+    let outcomes = delink_pe::emit::split_all_pe(&pe, outdir)?;
+
+    let shared = outdir.join("__shared_data.obj");
+    tracing::info!("emitting shared data → {}", shared.display());
+    let shared_stats = delink_pe::emit::emit_pe_shared(&pe, &shared)?;
+
+    let mut total = delink_pe::emit::EmitStats::default();
+    let mut failures = 0usize;
+    for o in &outcomes {
+        match &o.result {
+            Ok(s) => {
+                total.text_bytes += s.text_bytes;
+                total.local_symbols += s.local_symbols;
+                total.undef_symbols += s.undef_symbols;
+                total.relocations += s.relocations;
+                total.unresolved_calls += s.unresolved_calls;
+                total.instructions += s.instructions;
+            }
+            Err(e) => {
+                failures += 1;
+                tracing::warn!(cu = %o.cu_name, error = %e, "emit failed");
+            }
+        }
+    }
+
+    println!(
+        "pe-split complete: {} modules ({} failed)\n  {} bytes .text, {} instructions\n  {} local + {} undef symbols\n  {} relocs ({} unresolved calls)\n  shared: rdata={} data={} bss={} ({} ADDR64 relocs)",
+        outcomes.len().saturating_sub(failures),
+        failures,
+        total.text_bytes,
+        total.instructions,
+        total.local_symbols,
+        total.undef_symbols,
+        total.relocations,
+        total.unresolved_calls,
+        shared_stats.rdata_bytes,
+        shared_stats.data_bytes,
+        shared_stats.bss_bytes,
+        shared_stats.addr64_relocs,
+    );
     Ok(())
 }
