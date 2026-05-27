@@ -260,11 +260,21 @@ name = "delink-pe"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "delink-x86",
  "delink-x86_64",
  "object",
  "pdb",
  "rayon",
  "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "delink-x86"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "capstone",
  "tracing",
 ]
 

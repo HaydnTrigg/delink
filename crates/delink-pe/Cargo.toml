@@ -12,3 +12,4 @@ object = { workspace = true }
 pdb = { workspace = true }
 rayon = { workspace = true }
 delink-x86_64 = { workspace = true }
+delink-x86 = { workspace = true }
