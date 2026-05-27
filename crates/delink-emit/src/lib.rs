@@ -963,15 +963,16 @@ fn add_start_symbol(obj: &mut Object, section_id: SectionId, name: &str) {
 /// Sanitize a DWARF CU name (which often contains backslashes and colons
 /// on Windows-compiled inputs) into a filesystem-safe stem.
 pub fn sanitize_cu_name(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for ch in name.chars() {
-        match ch {
-            '/' | '\\' | ':' => out.push('_'),
-            c if c.is_ascii_whitespace() => out.push('_'),
-            c => out.push(c),
-        }
-    }
-    out
+    // Take only the final path component, strip any extension.
+    let basename = name
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or(name);
+    let stem = match basename.rfind('.') {
+        Some(i) => &basename[..i],
+        None => basename,
+    };
+    stem.to_string()
 }
 
 /// Split every CU in `idx` into its own `.o` under `out_dir`, in parallel.
