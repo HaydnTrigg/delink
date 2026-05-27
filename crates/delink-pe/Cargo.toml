@@ -1,0 +1,14 @@
+[package]
+name = "delink-pe"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+object = { workspace = true }
+pdb = { workspace = true }
+rayon = { workspace = true }
+delink-x86_64 = { workspace = true }

@@ -17,5 +17,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 delink-core.workspace = true
 delink-emit.workspace = true
+delink-pe.workspace = true
 memmap2.workspace = true
 object.workspace = true
