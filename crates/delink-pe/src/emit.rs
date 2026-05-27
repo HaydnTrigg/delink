@@ -522,14 +522,16 @@ fn resolve_or_add_undef(
 
 /// Sanitize a PDB module name (full path) into a filesystem-safe stem.
 fn sanitize_file_stem(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for ch in name.chars() {
-        match ch {
-            '/' | '\\' | ':' | ' ' | '\t' => out.push('_'),
-            c => out.push(c),
-        }
-    }
-    out.trim_start_matches('_').to_string()
+    // Take only the final path component, strip any extension.
+    let basename = name
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or(name);
+    let stem = match basename.rfind('.') {
+        Some(i) => &basename[..i],
+        None => basename,
+    };
+    stem.to_string()
 }
 
 fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
