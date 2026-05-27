@@ -164,7 +164,7 @@ pub fn emit_pe_cu(
                     }
                 }
 
-                let fn_offset = obj.append_section_data(sid, &fn_bytes, 16);
+                let fn_offset = obj.append_section_data(sid, &fn_bytes, 1);
 
                 let scope = if f.is_public { SymbolScope::Dynamic } else { SymbolScope::Compilation };
                 let sym_id = obj.add_symbol(Symbol {
