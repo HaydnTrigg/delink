@@ -98,6 +98,8 @@ pub fn emit_pe_cu(
     let mut total_unresolved_calls = 0usize;
     let mut total_unresolved_rip = 0usize;
 
+    let sid = obj.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
+
     for f in &live {
         let fn_start = (f.va - text_section.va) as usize;
         let fn_end = fn_start + f.size as usize;
@@ -111,32 +113,6 @@ pub fn emit_pe_cu(
         }
         let mut fn_bytes = text_section.data[fn_start..fn_end].to_vec();
         total_text_bytes += f.size as u64;
-
-        // Section name: .text$funcname (COFF per-function section convention).
-        let section_suffix = sanitize_coff_name(&f.name);
-        let section_name = format!(".text${}", section_suffix);
-        let sid = obj.add_section(
-            Vec::new(),
-            section_name.into_bytes(),
-            SectionKind::Text,
-        );
-
-        let scope = if f.is_public {
-            SymbolScope::Dynamic
-        } else {
-            SymbolScope::Compilation
-        };
-        let sym_id = obj.add_symbol(Symbol {
-            name: f.name.as_bytes().to_vec(),
-            value: 0,
-            size: f.size as u64,
-            kind: SymbolKind::Text,
-            scope,
-            weak: false,
-            section: SymbolSection::Section(sid),
-            flags: SymbolFlags::None,
-        });
-        local_syms.insert(f.name.clone(), sym_id);
 
         // Run relocation recovery and apply base-reloc absolute-pointer fixups,
         // branching on PE architecture.
@@ -166,7 +142,9 @@ pub fn emit_pe_cu(
                     }
                 }
 
-                // Zero and record ADDR64 slots from the PE base-reloc table.
+                // Zero ADDR64 slots from the PE base-reloc table; stage relocs
+                // until after append so offsets are section-relative.
+                let mut staged: Vec<(u64, SymbolId, i64, u16)> = Vec::new();
                 for br in &pe.base_relocations {
                     if !matches!(br.kind, BaseRelocKind::Dir64) {
                         continue;
@@ -179,25 +157,41 @@ pub fn emit_pe_cu(
                         let stored_va =
                             u64::from_le_bytes(fn_bytes[off..off + 8].try_into().unwrap());
                         if let Some((sym_name, addend)) = pe.symbols.resolve_data(stored_va) {
-                            let addr64_sym =
-                                resolve_or_add_undef(&mut obj, &mut undef_cache, &sym_name);
+                            let sym = resolve_or_add_undef(&mut obj, &mut undef_cache, &sym_name);
                             fn_bytes[off..off + 8].fill(0);
-                            obj.add_relocation(
-                                sid,
-                                Relocation {
-                                    offset: off as u64,
-                                    symbol: addr64_sym,
-                                    addend,
-                                    flags: RelocationFlags::Coff { typ: REL_AMD64_ADDR64 },
-                                },
-                            )
-                            .with_context(|| format!("add ADDR64 reloc at {:#x}", br.va))?;
-                            total_relocs += 1;
+                            staged.push((off as u64, sym, addend, REL_AMD64_ADDR64));
                         }
                     }
                 }
 
-                obj.append_section_data(sid, &fn_bytes, 16);
+                let fn_offset = obj.append_section_data(sid, &fn_bytes, 16);
+
+                let scope = if f.is_public { SymbolScope::Dynamic } else { SymbolScope::Compilation };
+                let sym_id = obj.add_symbol(Symbol {
+                    name: f.name.as_bytes().to_vec(),
+                    value: fn_offset,
+                    size: f.size as u64,
+                    kind: SymbolKind::Text,
+                    scope,
+                    weak: false,
+                    section: SymbolSection::Section(sid),
+                    flags: SymbolFlags::None,
+                });
+                local_syms.insert(f.name.clone(), sym_id);
+
+                for (off, sym, addend, typ) in staged {
+                    obj.add_relocation(
+                        sid,
+                        Relocation {
+                            offset: fn_offset + off,
+                            symbol: sym,
+                            addend,
+                            flags: RelocationFlags::Coff { typ },
+                        },
+                    )
+                    .with_context(|| format!("add ADDR64 reloc at {:#x}", f.va + off))?;
+                    total_relocs += 1;
+                }
 
                 for r in &recovery.relocs {
                     let sym_id =
@@ -205,7 +199,7 @@ pub fn emit_pe_cu(
                     obj.add_relocation(
                         sid,
                         Relocation {
-                            offset: r.offset,
+                            offset: fn_offset + r.offset,
                             symbol: sym_id,
                             addend: r.addend,
                             flags: RelocationFlags::Coff { typ: REL_AMD64_REL32 },
@@ -237,7 +231,9 @@ pub fn emit_pe_cu(
                     }
                 }
 
-                // Zero and record DIR32 slots from HIGHLOW base-reloc entries.
+                // Zero DIR32 slots from HIGHLOW base-reloc entries; stage relocs
+                // until after append so offsets are section-relative.
+                let mut staged: Vec<(u64, SymbolId, i64, u16)> = Vec::new();
                 for br in &pe.base_relocations {
                     if !matches!(br.kind, BaseRelocKind::HighLow) {
                         continue;
@@ -251,25 +247,41 @@ pub fn emit_pe_cu(
                             fn_bytes[off..off + 4].try_into().unwrap(),
                         ) as u64;
                         if let Some((sym_name, addend)) = pe.symbols.resolve_data(stored_va) {
-                            let dir32_sym =
-                                resolve_or_add_undef(&mut obj, &mut undef_cache, &sym_name);
+                            let sym = resolve_or_add_undef(&mut obj, &mut undef_cache, &sym_name);
                             fn_bytes[off..off + 4].fill(0);
-                            obj.add_relocation(
-                                sid,
-                                Relocation {
-                                    offset: off as u64,
-                                    symbol: dir32_sym,
-                                    addend,
-                                    flags: RelocationFlags::Coff { typ: REL_I386_DIR32 },
-                                },
-                            )
-                            .with_context(|| format!("add DIR32 reloc at {:#x}", br.va))?;
-                            total_relocs += 1;
+                            staged.push((off as u64, sym, addend, REL_I386_DIR32));
                         }
                     }
                 }
 
-                obj.append_section_data(sid, &fn_bytes, 4);
+                let fn_offset = obj.append_section_data(sid, &fn_bytes, 4);
+
+                let scope = if f.is_public { SymbolScope::Dynamic } else { SymbolScope::Compilation };
+                let sym_id = obj.add_symbol(Symbol {
+                    name: f.name.as_bytes().to_vec(),
+                    value: fn_offset,
+                    size: f.size as u64,
+                    kind: SymbolKind::Text,
+                    scope,
+                    weak: false,
+                    section: SymbolSection::Section(sid),
+                    flags: SymbolFlags::None,
+                });
+                local_syms.insert(f.name.clone(), sym_id);
+
+                for (off, sym, addend, typ) in staged {
+                    obj.add_relocation(
+                        sid,
+                        Relocation {
+                            offset: fn_offset + off,
+                            symbol: sym,
+                            addend,
+                            flags: RelocationFlags::Coff { typ },
+                        },
+                    )
+                    .with_context(|| format!("add DIR32 reloc at {:#x}", f.va + off))?;
+                    total_relocs += 1;
+                }
 
                 for r in &recovery.relocs {
                     let sym_id =
@@ -277,7 +289,7 @@ pub fn emit_pe_cu(
                     obj.add_relocation(
                         sid,
                         Relocation {
-                            offset: r.offset,
+                            offset: fn_offset + r.offset,
                             symbol: sym_id,
                             addend: r.addend,
                             flags: RelocationFlags::Coff { typ: REL_I386_REL32 },
@@ -506,25 +518,6 @@ fn resolve_or_add_undef(
     });
     undef.insert(name.to_string(), id);
     id
-}
-
-/// Sanitize a symbol name for use as a COFF section-name suffix.
-fn sanitize_coff_name(name: &str) -> String {
-    let mut out = String::with_capacity(name.len().min(60));
-    for ch in name.chars() {
-        match ch {
-            c if c.is_ascii_alphanumeric() => out.push(c),
-            '_' | '$' | '@' | '.' => out.push(ch),
-            _ => out.push('_'),
-        }
-        if out.len() >= 60 {
-            break;
-        }
-    }
-    if out.is_empty() {
-        out.push('x');
-    }
-    out
 }
 
 /// Sanitize a PDB module name (full path) into a filesystem-safe stem.
