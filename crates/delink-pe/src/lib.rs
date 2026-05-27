@@ -1,10 +1,7 @@
-//! PE (.exe) + PDB loader for `so-delink`.
+//! PE (.exe/.dll) + PDB loader for `so-delink`.
 //!
-//! Parses a 64-bit Windows PE executable together with its PDB file and
-//! produces a `PeContext` that the rest of the tool can use to:
-//!   - iterate compilation units (PDB modules → `PeCompilationUnit`)
-//!   - resolve addresses to symbol names (`PeGlobalSymbols`)
-//!   - emit per-CU COFF `.obj` files via `delink_pe::emit`
+//! Supports both 64-bit (PE32+, machine AMD64) and 32-bit (PE32, machine I386)
+//! PE executables together with their PDB files.
 
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -15,6 +12,15 @@ pub mod symbols;
 
 pub use cu::{PeCompilationUnit, PeCuIndex, PeContrib, PeFunction};
 pub use symbols::PeGlobalSymbols;
+
+/// Target architecture of the loaded PE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeArch {
+    /// AMD64 / x86-64 (machine = 0x8664, magic = 0x020B PE32+).
+    X86_64,
+    /// IA-32 / x86 (machine = 0x014C, magic = 0x010B PE32).
+    X86,
+}
 
 /// A single PE section with its raw bytes and virtual-address metadata.
 #[derive(Debug, Clone)]
@@ -72,9 +78,9 @@ pub struct BaseReloc {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BaseRelocKind {
-    /// `IMAGE_REL_BASED_DIR64` (10) — 64-bit absolute pointer.
+    /// `IMAGE_REL_BASED_DIR64` (10) — 64-bit absolute pointer (PE32+).
     Dir64,
-    /// `IMAGE_REL_BASED_HIGHLOW` (3) — 32-bit absolute pointer.
+    /// `IMAGE_REL_BASED_HIGHLOW` (3) — 32-bit absolute pointer (PE32).
     HighLow,
     /// Other type we don't handle.
     Other(u8),
@@ -82,6 +88,7 @@ pub enum BaseRelocKind {
 
 /// All parsed data from a PE + PDB pair.
 pub struct PeContext {
+    pub arch: PeArch,
     pub image_base: u64,
     pub sections: Vec<PeSection>,
     pub cu_index: PeCuIndex,
@@ -104,17 +111,20 @@ impl PeContext {
     }
 }
 
-/// Load a 64-bit PE executable and its associated PDB file.
+/// Load a PE executable and its associated PDB file.
+///
+/// Accepts both 32-bit (PE32, machine I386) and 64-bit (PE32+, machine AMD64).
 pub fn load_pe_and_pdb(exe_data: &[u8], pdb_data: &[u8]) -> Result<PeContext> {
-    let (image_base, sections) = parse_pe_sections(exe_data)?;
+    let (arch, image_base, sections) = parse_pe_sections(exe_data)?;
     let base_relocations = parse_base_relocations(&sections, image_base);
-    let imports = parse_imports(exe_data, &sections, image_base);
+    let imports = parse_imports(exe_data, &sections, image_base, arch);
 
     let (cu_index, all_functions) = cu::build_cu_index(pdb_data, image_base, &sections)?;
     let symbols =
         symbols::PeGlobalSymbols::build(all_functions, &imports, &sections, image_base);
 
     Ok(PeContext {
+        arch,
         image_base,
         sections,
         cu_index,
@@ -128,8 +138,7 @@ pub fn load_pe_and_pdb(exe_data: &[u8], pdb_data: &[u8]) -> Result<PeContext> {
 // PE header parsing
 // ---------------------------------------------------------------------------
 
-fn parse_pe_sections(exe_data: &[u8]) -> Result<(u64, Vec<PeSection>)> {
-    // Minimum size for DOS header + PE offset field.
+fn parse_pe_sections(exe_data: &[u8]) -> Result<(PeArch, u64, Vec<PeSection>)> {
     if exe_data.len() < 0x40 {
         return Err(anyhow!("file too small for PE header"));
     }
@@ -146,18 +155,17 @@ fn parse_pe_sections(exe_data: &[u8]) -> Result<(u64, Vec<PeSection>)> {
         return Err(anyhow!("PE signature not found"));
     }
 
-    // COFF file header: 20 bytes starting at e_lfanew + 4
+    // COFF file header: 20 bytes starting at e_lfanew + 4.
     let coff_off = e_lfanew + 4;
     if coff_off + 20 > exe_data.len() {
         return Err(anyhow!("COFF header out of bounds"));
     }
     let machine = u16::from_le_bytes(exe_data[coff_off..coff_off + 2].try_into().unwrap());
-    if machine != 0x8664 {
-        return Err(anyhow!(
-            "only AMD64 PE files supported (machine=0x{:04x})",
-            machine
-        ));
-    }
+    let arch = match machine {
+        0x8664 => PeArch::X86_64,
+        0x014C => PeArch::X86,
+        other => return Err(anyhow!("unsupported machine type 0x{:04x} (only AMD64 and I386 supported)", other)),
+    };
     let num_sections =
         u16::from_le_bytes(exe_data[coff_off + 2..coff_off + 4].try_into().unwrap()) as usize;
     let opt_header_size =
@@ -169,19 +177,30 @@ fn parse_pe_sections(exe_data: &[u8]) -> Result<(u64, Vec<PeSection>)> {
         return Err(anyhow!("optional header offset out of bounds"));
     }
     let magic = u16::from_le_bytes(exe_data[opt_off..opt_off + 2].try_into().unwrap());
-    if magic != 0x020B {
-        return Err(anyhow!(
-            "only PE32+ (64-bit) supported (magic=0x{:04x})",
-            magic
-        ));
-    }
 
-    // ImageBase is at offset 24 in IMAGE_OPTIONAL_HEADER64.
-    if opt_off + 32 > exe_data.len() {
-        return Err(anyhow!("optional header too short for ImageBase"));
-    }
-    let image_base =
-        u64::from_le_bytes(exe_data[opt_off + 24..opt_off + 32].try_into().unwrap());
+    // ImageBase offset and size differ between PE32 and PE32+.
+    //   PE32  (0x010B): ImageBase at opt_off+28, 4 bytes (u32)
+    //   PE32+ (0x020B): ImageBase at opt_off+24, 8 bytes (u64)
+    let image_base: u64 = match magic {
+        0x020B => {
+            if opt_off + 32 > exe_data.len() {
+                return Err(anyhow!("PE32+ optional header too short for ImageBase"));
+            }
+            u64::from_le_bytes(exe_data[opt_off + 24..opt_off + 32].try_into().unwrap())
+        }
+        0x010B => {
+            if opt_off + 32 > exe_data.len() {
+                return Err(anyhow!("PE32 optional header too short for ImageBase"));
+            }
+            u32::from_le_bytes(exe_data[opt_off + 28..opt_off + 32].try_into().unwrap()) as u64
+        }
+        other => {
+            return Err(anyhow!(
+                "unsupported PE optional-header magic 0x{:04x}",
+                other
+            ))
+        }
+    };
 
     // Section headers start after the optional header.
     let sections_off = opt_off + opt_header_size;
@@ -207,7 +226,6 @@ fn parse_pe_sections(exe_data: &[u8]) -> Result<(u64, Vec<PeSection>)> {
         let rva = virtual_address;
         let va = image_base + rva;
 
-        // Load raw bytes; zero-extend to virtual_size for BSS regions.
         let mut data = if ptr_to_raw_data == 0 || size_of_raw_data == 0 {
             Vec::new()
         } else {
@@ -217,7 +235,6 @@ fn parse_pe_sections(exe_data: &[u8]) -> Result<(u64, Vec<PeSection>)> {
             }
             exe_data[ptr_to_raw_data..end].to_vec()
         };
-        // Pad with zeroes if the virtual size is larger than raw data.
         if (data.len() as u64) < virtual_size {
             data.resize(virtual_size as usize, 0);
         }
@@ -232,7 +249,7 @@ fn parse_pe_sections(exe_data: &[u8]) -> Result<(u64, Vec<PeSection>)> {
         });
     }
 
-    Ok((image_base, sections))
+    Ok((arch, image_base, sections))
 }
 
 // ---------------------------------------------------------------------------
@@ -295,8 +312,9 @@ fn parse_imports(
     exe_data: &[u8],
     sections: &[PeSection],
     image_base: u64,
+    arch: PeArch,
 ) -> HashMap<u64, String> {
-    match try_parse_imports(exe_data, sections, image_base) {
+    match try_parse_imports(exe_data, sections, image_base, arch) {
         Ok(map) => map,
         Err(e) => {
             tracing::warn!("import table parse failed (ignoring): {e:#}");
@@ -309,11 +327,8 @@ fn try_parse_imports(
     exe_data: &[u8],
     sections: &[PeSection],
     image_base: u64,
+    arch: PeArch,
 ) -> Result<HashMap<u64, String>> {
-    // Optional header layout for PE32+ (PE64):
-    //   offset 0: Magic (2)       offset 24: ImageBase (8)   ...
-    //   offset 112: DataDirectory[0] (8 bytes each)
-    //   DataDirectory[1] = Import Table = opt_off + 112 + 8
     if exe_data.len() < 0x40 {
         return Ok(HashMap::new());
     }
@@ -321,8 +336,13 @@ fn try_parse_imports(
     let coff_off = e_lfanew + 4;
     let opt_off = coff_off + 20;
 
-    // Import directory is DataDirectory[1], at opt_off + 112 + 1*8.
-    let import_dir_off = opt_off + 112 + 8;
+    // DataDirectory layout in the optional header:
+    //   PE32  (32-bit): DataDirectory starts at opt_off + 96;  [1] at opt_off + 104
+    //   PE32+ (64-bit): DataDirectory starts at opt_off + 112; [1] at opt_off + 120
+    let import_dir_off = match arch {
+        PeArch::X86_64 => opt_off + 112 + 8,
+        PeArch::X86 => opt_off + 96 + 8,
+    };
     if import_dir_off + 8 > exe_data.len() {
         return Ok(HashMap::new());
     }
@@ -332,10 +352,16 @@ fn try_parse_imports(
         return Ok(HashMap::new());
     }
 
+    // Thunk entry width: 8 bytes for PE32+, 4 bytes for PE32.
+    let thunk_width: u64 = match arch {
+        PeArch::X86_64 => 8,
+        PeArch::X86 => 4,
+    };
+
     let mut map = HashMap::new();
-    // IMAGE_IMPORT_DESCRIPTOR is 20 bytes.
     let mut desc_rva = import_rva as u64;
     loop {
+        // IMAGE_IMPORT_DESCRIPTOR is 20 bytes.
         let Some(desc) = rva_slice(sections, desc_rva, 20) else {
             break;
         };
@@ -344,7 +370,7 @@ fn try_parse_imports(
         let first_thunk = u32::from_le_bytes(desc[16..20].try_into().unwrap()) as u64;
 
         if original_first_thunk == 0 && first_thunk == 0 {
-            break; // end of descriptor array
+            break;
         }
 
         let hint_rva = if original_first_thunk != 0 {
@@ -355,26 +381,35 @@ fn try_parse_imports(
 
         let mut entry_idx = 0u64;
         loop {
-            let Some(thunk_bytes) = rva_slice(sections, hint_rva + entry_idx * 8, 8) else {
+            let Some(thunk_bytes) =
+                rva_slice(sections, hint_rva + entry_idx * thunk_width, thunk_width as usize)
+            else {
                 break;
             };
-            let thunk = u64::from_le_bytes(thunk_bytes.try_into().unwrap());
+
+            // Read thunk as a native-width integer, zero-extended to u64.
+            let thunk: u64 = match arch {
+                PeArch::X86_64 => u64::from_le_bytes(thunk_bytes.try_into().unwrap()),
+                PeArch::X86 => u32::from_le_bytes(thunk_bytes.try_into().unwrap()) as u64,
+            };
             if thunk == 0 {
                 break;
             }
 
-            let iat_va = image_base + first_thunk + entry_idx * 8;
-            let func_name = if thunk >> 63 == 1 {
-                // Import by ordinal.
+            let iat_va = image_base + first_thunk + entry_idx * thunk_width;
+
+            // High bit signals ordinal import; bit width depends on arch.
+            let ordinal_bit = match arch {
+                PeArch::X86_64 => 63,
+                PeArch::X86 => 31,
+            };
+            let func_name = if (thunk >> ordinal_bit) & 1 == 1 {
                 let ordinal = thunk as u16;
-                let dll = name_rva
-                    .checked_sub(1)
-                    .and_then(|_| rva_cstr(sections, name_rva))
-                    .unwrap_or_default();
+                let dll = rva_cstr(sections, name_rva).unwrap_or_default();
                 format!("{}#{}", dll, ordinal)
             } else {
-                // Import by name: thunk is RVA of IMAGE_IMPORT_BY_NAME (2-byte hint + name).
-                let ibn_rva = (thunk & 0x7FFF_FFFF_FFFF_FFFF) as u64;
+                // IMAGE_IMPORT_BY_NAME: 2-byte hint + name string.
+                let ibn_rva = thunk & !(1u64 << ordinal_bit);
                 rva_cstr(sections, ibn_rva + 2).unwrap_or_default()
             };
 
@@ -405,7 +440,6 @@ pub(crate) fn rva_slice<'a>(sections: &'a [PeSection], rva: u64, len: usize) -> 
 }
 
 pub(crate) fn rva_cstr(sections: &[PeSection], rva: u64) -> Option<String> {
-    // Find the section and read until null terminator.
     for s in sections {
         if rva >= s.rva && rva < s.rva + s.virtual_size {
             let off = (rva - s.rva) as usize;

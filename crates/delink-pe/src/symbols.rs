@@ -105,8 +105,17 @@ impl PeGlobalSymbols {
     }
 }
 
-// Implement the x86-64 recovery's SymbolResolver trait.
 impl delink_x86_64::recover::SymbolResolver for PeGlobalSymbols {
+    fn resolve_code(&self, va: u64) -> Option<(String, i64)> {
+        PeGlobalSymbols::resolve_code(self, va)
+    }
+
+    fn resolve_data(&self, va: u64) -> Option<(String, i64)> {
+        PeGlobalSymbols::resolve_data(self, va)
+    }
+}
+
+impl delink_x86::recover::SymbolResolver for PeGlobalSymbols {
     fn resolve_code(&self, va: u64) -> Option<(String, i64)> {
         PeGlobalSymbols::resolve_code(self, va)
     }

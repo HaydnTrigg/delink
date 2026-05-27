@@ -6,6 +6,7 @@ members = [
     "crates/delink-aarch64",
     "crates/delink-emit",
     "crates/delink-x86_64",
+    "crates/delink-x86",
     "crates/delink-pe",
     "crates/delink-cli",
 ]
@@ -37,6 +38,7 @@ delink-arch = { path = "crates/delink-arch" }
 delink-aarch64 = { path = "crates/delink-aarch64" }
 delink-emit = { path = "crates/delink-emit" }
 delink-x86_64 = { path = "crates/delink-x86_64" }
+delink-x86 = { path = "crates/delink-x86" }
 delink-pe = { path = "crates/delink-pe" }
 
 [profile.release]

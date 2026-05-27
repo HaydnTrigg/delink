@@ -1,0 +1,10 @@
+[package]
+name = "delink-x86"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+tracing = { workspace = true }
+capstone = { workspace = true }

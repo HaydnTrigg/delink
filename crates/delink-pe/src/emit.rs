@@ -3,10 +3,9 @@
 //! Produces one COFF ET_REL-equivalent per `PeCompilationUnit` plus a single
 //! `__shared_data.obj` carrying `.rdata`, `.data`, and `.bss`.
 //!
-//! Output format: `BinaryFormat::Coff`, `Architecture::X86_64`.
-//! Relocations use `IMAGE_REL_AMD64_REL32` for calls / RIP-relative refs and
-//! `IMAGE_REL_AMD64_ADDR64` for embedded 64-bit pointers from the base-reloc
-//! table.
+//! Supports both AMD64 (PE32+) and I386 (PE32) inputs:
+//!   AMD64: `IMAGE_REL_AMD64_REL32` / `IMAGE_REL_AMD64_ADDR64`
+//!   I386:  `IMAGE_REL_I386_REL32`  / `IMAGE_REL_I386_DIR32`
 
 use anyhow::{anyhow, Context, Result};
 use object::write::{Object, Relocation, SectionId, Symbol, SymbolId, SymbolSection};
@@ -19,11 +18,15 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::cu::{PeCompilationUnit, PeFunction};
-use crate::{BaseRelocKind, PeContext, PeSection};
+use crate::{BaseRelocKind, PeArch, PeContext, PeSection};
 
-// COFF AMD64 relocation type constants.
+// AMD64 relocation type constants.
 const REL_AMD64_ADDR64: u16 = object::pe::IMAGE_REL_AMD64_ADDR64;
 const REL_AMD64_REL32: u16 = object::pe::IMAGE_REL_AMD64_REL32;
+
+// I386 relocation type constants.
+const REL_I386_DIR32: u16 = object::pe::IMAGE_REL_I386_DIR32;
+const REL_I386_REL32: u16 = object::pe::IMAGE_REL_I386_REL32;
 
 #[derive(Debug, Default)]
 pub struct EmitStats {
@@ -82,7 +85,11 @@ pub fn emit_pe_cu(
     }
     live.sort_by_key(|f| f.va);
 
-    let mut obj = Object::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+    let coff_arch = match pe.arch {
+        PeArch::X86_64 => Architecture::X86_64,
+        PeArch::X86 => Architecture::I386,
+    };
+    let mut obj = Object::new(BinaryFormat::Coff, coff_arch, Endianness::Little);
     let mut local_syms: HashMap<String, SymbolId> = HashMap::new();
     let mut undef_cache: HashMap<String, SymbolId> = HashMap::new();
     let mut total_text_bytes = 0u64;
@@ -114,7 +121,6 @@ pub fn emit_pe_cu(
             SectionKind::Text,
         );
 
-        // Add the function symbol.
         let scope = if f.is_public {
             SymbolScope::Dynamic
         } else {
@@ -132,79 +138,155 @@ pub fn emit_pe_cu(
         });
         local_syms.insert(f.name.clone(), sym_id);
 
-        // Run relocation recovery.
-        let recovery = delink_x86_64::recover(
-            &fn_bytes,
-            f.va,
-            f.size as u64,
-            &pe.symbols,
-        )
-        .with_context(|| format!("recover relocs for '{}' at {:#x}", f.name, f.va))?;
+        // Run relocation recovery and apply base-reloc absolute-pointer fixups,
+        // branching on PE architecture.
+        match pe.arch {
+            PeArch::X86_64 => {
+                let recovery = delink_x86_64::recover(
+                    &fn_bytes,
+                    f.va,
+                    f.size as u64,
+                    &pe.symbols,
+                )
+                .with_context(|| format!("recover relocs for '{}' at {:#x}", f.name, f.va))?;
 
-        total_instructions += recovery.diag.instructions;
-        total_unresolved_calls += recovery.diag.calls_unresolved;
-        total_unresolved_rip += recovery.diag.rip_refs_unresolved;
+                total_instructions += recovery.diag.instructions;
+                total_unresolved_calls += recovery.diag.calls_unresolved;
+                total_unresolved_rip += recovery.diag.rip_refs_unresolved;
 
-        // Zero out the bytes at each reloc position (COFF relocs start from 0).
-        for r in &recovery.relocs {
-            let off = r.offset as usize;
-            let zero_len = match r.kind {
-                delink_x86_64::RelocKind::Rel32 => 4,
-                delink_x86_64::RelocKind::Addr64 => 8,
-            };
-            if off + zero_len <= fn_bytes.len() {
-                fn_bytes[off..off + zero_len].fill(0);
-            }
-        }
+                // Zero REL32 positions.
+                for r in &recovery.relocs {
+                    let off = r.offset as usize;
+                    let zero_len = match r.kind {
+                        delink_x86_64::RelocKind::Rel32 => 4,
+                        delink_x86_64::RelocKind::Addr64 => 8,
+                    };
+                    if off + zero_len <= fn_bytes.len() {
+                        fn_bytes[off..off + zero_len].fill(0);
+                    }
+                }
 
-        // Also zero ADDR64 slots identified via the PE base-relocation table
-        // that fall inside this function.
-        for br in &pe.base_relocations {
-            if !matches!(br.kind, BaseRelocKind::Dir64) {
-                continue;
-            }
-            if br.va < f.va || br.va + 8 > f.va + f.size as u64 {
-                continue;
-            }
-            let off = (br.va - f.va) as usize;
-            if off + 8 <= fn_bytes.len() {
-                // Read the target VA currently stored at this slot.
-                let stored_va = u64::from_le_bytes(fn_bytes[off..off + 8].try_into().unwrap());
-                if let Some((sym_name, addend)) = pe.symbols.resolve_data(stored_va) {
-                    let addr64_sym = resolve_or_add_undef(&mut obj, &mut undef_cache, &sym_name);
-                    fn_bytes[off..off + 8].fill(0);
+                // Zero and record ADDR64 slots from the PE base-reloc table.
+                for br in &pe.base_relocations {
+                    if !matches!(br.kind, BaseRelocKind::Dir64) {
+                        continue;
+                    }
+                    if br.va < f.va || br.va + 8 > f.va + f.size as u64 {
+                        continue;
+                    }
+                    let off = (br.va - f.va) as usize;
+                    if off + 8 <= fn_bytes.len() {
+                        let stored_va =
+                            u64::from_le_bytes(fn_bytes[off..off + 8].try_into().unwrap());
+                        if let Some((sym_name, addend)) = pe.symbols.resolve_data(stored_va) {
+                            let addr64_sym =
+                                resolve_or_add_undef(&mut obj, &mut undef_cache, &sym_name);
+                            fn_bytes[off..off + 8].fill(0);
+                            obj.add_relocation(
+                                sid,
+                                Relocation {
+                                    offset: off as u64,
+                                    symbol: addr64_sym,
+                                    addend,
+                                    flags: RelocationFlags::Coff { typ: REL_AMD64_ADDR64 },
+                                },
+                            )
+                            .with_context(|| format!("add ADDR64 reloc at {:#x}", br.va))?;
+                            total_relocs += 1;
+                        }
+                    }
+                }
+
+                obj.append_section_data(sid, &fn_bytes, 16);
+
+                for r in &recovery.relocs {
+                    let sym_id =
+                        resolve_symbol(&mut obj, &local_syms, &mut undef_cache, &r.target);
                     obj.add_relocation(
                         sid,
                         Relocation {
-                            offset: off as u64,
-                            symbol: addr64_sym,
-                            addend,
-                            flags: RelocationFlags::Coff { typ: REL_AMD64_ADDR64 },
+                            offset: r.offset,
+                            symbol: sym_id,
+                            addend: r.addend,
+                            flags: RelocationFlags::Coff { typ: REL_AMD64_REL32 },
                         },
                     )
-                    .with_context(|| format!("add ADDR64 reloc at {:#x}", br.va))?;
+                    .with_context(|| format!("add rel32 reloc at {:#x}", r.offset))?;
                     total_relocs += 1;
                 }
             }
-        }
 
-        obj.append_section_data(sid, &fn_bytes, 16);
+            PeArch::X86 => {
+                let recovery = delink_x86::recover(
+                    &fn_bytes,
+                    f.va,
+                    f.size as u64,
+                    &pe.symbols,
+                )
+                .with_context(|| format!("recover relocs for '{}' at {:#x}", f.name, f.va))?;
 
-        // Add REL32 relocations from recovery.
-        for r in &recovery.relocs {
-            let sym_id =
-                resolve_symbol(&mut obj, &local_syms, &mut undef_cache, &r.target);
-            obj.add_relocation(
-                sid,
-                Relocation {
-                    offset: r.offset,
-                    symbol: sym_id,
-                    addend: r.addend,
-                    flags: RelocationFlags::Coff { typ: REL_AMD64_REL32 },
-                },
-            )
-            .with_context(|| format!("add rel32 reloc at {:#x}", r.offset))?;
-            total_relocs += 1;
+                total_instructions += recovery.diag.instructions;
+                total_unresolved_calls += recovery.diag.calls_unresolved;
+                total_unresolved_rip += recovery.diag.rip_refs_unresolved;
+
+                // Zero REL32 positions.
+                for r in &recovery.relocs {
+                    let off = r.offset as usize;
+                    if off + 4 <= fn_bytes.len() {
+                        fn_bytes[off..off + 4].fill(0);
+                    }
+                }
+
+                // Zero and record DIR32 slots from HIGHLOW base-reloc entries.
+                for br in &pe.base_relocations {
+                    if !matches!(br.kind, BaseRelocKind::HighLow) {
+                        continue;
+                    }
+                    if br.va < f.va || br.va + 4 > f.va + f.size as u64 {
+                        continue;
+                    }
+                    let off = (br.va - f.va) as usize;
+                    if off + 4 <= fn_bytes.len() {
+                        let stored_va = u32::from_le_bytes(
+                            fn_bytes[off..off + 4].try_into().unwrap(),
+                        ) as u64;
+                        if let Some((sym_name, addend)) = pe.symbols.resolve_data(stored_va) {
+                            let dir32_sym =
+                                resolve_or_add_undef(&mut obj, &mut undef_cache, &sym_name);
+                            fn_bytes[off..off + 4].fill(0);
+                            obj.add_relocation(
+                                sid,
+                                Relocation {
+                                    offset: off as u64,
+                                    symbol: dir32_sym,
+                                    addend,
+                                    flags: RelocationFlags::Coff { typ: REL_I386_DIR32 },
+                                },
+                            )
+                            .with_context(|| format!("add DIR32 reloc at {:#x}", br.va))?;
+                            total_relocs += 1;
+                        }
+                    }
+                }
+
+                obj.append_section_data(sid, &fn_bytes, 4);
+
+                for r in &recovery.relocs {
+                    let sym_id =
+                        resolve_symbol(&mut obj, &local_syms, &mut undef_cache, &r.target);
+                    obj.add_relocation(
+                        sid,
+                        Relocation {
+                            offset: r.offset,
+                            symbol: sym_id,
+                            addend: r.addend,
+                            flags: RelocationFlags::Coff { typ: REL_I386_REL32 },
+                        },
+                    )
+                    .with_context(|| format!("add rel32 reloc at {:#x}", r.offset))?;
+                    total_relocs += 1;
+                }
+            }
         }
     }
 
@@ -227,10 +309,14 @@ pub fn emit_pe_cu(
 // ---------------------------------------------------------------------------
 
 /// Emit `__shared_data.obj` carrying `.rdata`, `.data`, `.bss` from the PE,
-/// with `IMAGE_REL_AMD64_ADDR64` relocations for all DIR64 base-reloc entries
+/// with absolute-pointer relocations for all applicable base-reloc entries
 /// that land in those sections.
 pub fn emit_pe_shared(pe: &PeContext, out_path: &Path) -> Result<SharedDataStats> {
-    let mut obj = Object::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+    let coff_arch = match pe.arch {
+        PeArch::X86_64 => Architecture::X86_64,
+        PeArch::X86 => Architecture::I386,
+    };
+    let mut obj = Object::new(BinaryFormat::Coff, coff_arch, Endianness::Little);
     let mut undef_cache: HashMap<String, SymbolId> = HashMap::new();
     let mut stats = SharedDataStats::default();
 
@@ -258,7 +344,6 @@ pub fn emit_pe_shared(pe: &PeContext, out_path: &Path) -> Result<SharedDataStats
             } else {
                 obj.append_section_data(sid, &section.data, 16);
             }
-            // Named start symbol so per-CU .obj references work.
             obj.add_symbol(Symbol {
                 name: start_sym.as_bytes().to_vec(),
                 value: 0,
@@ -308,23 +393,32 @@ pub fn emit_pe_shared(pe: &PeContext, out_path: &Path) -> Result<SharedDataStats
         );
     }
 
-    // Translate DIR64 base relocations that land in our data sections.
+    // Translate base relocations that land in our data sections.
     for br in &pe.base_relocations {
-        if !matches!(br.kind, BaseRelocKind::Dir64) {
-            continue;
-        }
-        let Some(slot) = slots.iter().find(|s| br.va >= s.va && br.va + 8 <= s.va + s.size)
+        let (pointer_width, abs_reloc_typ) = match (&pe.arch, &br.kind) {
+            (PeArch::X86_64, BaseRelocKind::Dir64) => (8usize, REL_AMD64_ADDR64),
+            (PeArch::X86, BaseRelocKind::HighLow) => (4usize, REL_I386_DIR32),
+            _ => continue,
+        };
+
+        let Some(slot) =
+            slots.iter().find(|s| br.va >= s.va && br.va + pointer_width as u64 <= s.va + s.size)
         else {
             continue;
         };
         let section_offset = br.va - slot.va;
 
-        // Read the target VA from the PE data.
-        let stored_bytes = pe.data_at_va(br.va, 8);
+        let stored_bytes = pe.data_at_va(br.va, pointer_width);
         let Some(stored_bytes) = stored_bytes else {
             continue;
         };
-        let target_va = u64::from_le_bytes(stored_bytes.try_into().unwrap());
+
+        // Read the stored VA (32-bit or 64-bit).
+        let target_va: u64 = match pointer_width {
+            8 => u64::from_le_bytes(stored_bytes.try_into().unwrap()),
+            4 => u32::from_le_bytes(stored_bytes.try_into().unwrap()) as u64,
+            _ => unreachable!(),
+        };
 
         if let Some((sym_name, addend)) = pe.symbols.resolve_data(target_va) {
             let sym_id = resolve_or_add_undef(&mut obj, &mut undef_cache, &sym_name);
@@ -334,12 +428,10 @@ pub fn emit_pe_shared(pe: &PeContext, out_path: &Path) -> Result<SharedDataStats
                     offset: section_offset,
                     symbol: sym_id,
                     addend,
-                    flags: RelocationFlags::Coff { typ: REL_AMD64_ADDR64 },
+                    flags: RelocationFlags::Coff { typ: abs_reloc_typ },
                 },
             )
-            .with_context(|| {
-                format!("add shared ADDR64 reloc at {:#x}", br.va)
-            })?;
+            .with_context(|| format!("add shared abs reloc at {:#x}", br.va))?;
             stats.addr64_relocs += 1;
         }
     }
@@ -444,7 +536,6 @@ fn sanitize_file_stem(name: &str) -> String {
             c => out.push(c),
         }
     }
-    // Trim leading underscores that come from drive letters like "C:_".
     out.trim_start_matches('_').to_string()
 }
 
