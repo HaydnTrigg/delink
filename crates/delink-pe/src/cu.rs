@@ -77,6 +77,21 @@ pub fn build_cu_index(
     let dbi = pdb.debug_information().context("PDB debug information")?;
     let address_map = pdb.address_map().context("PDB address map")?;
 
+    // --- Build VA → mangled name from the public symbols stream ---
+    let mut mangled_by_va: HashMap<u64, String> = HashMap::new();
+    {
+        let global_syms = pdb.global_symbols().context("PDB global symbols")?;
+        let mut iter = global_syms.iter();
+        while let Some(sym) = iter.next()? {
+            if let Ok(pdb::SymbolData::Public(p)) = sym.parse() {
+                if let Some(rva) = p.offset.to_rva(&address_map) {
+                    let va = image_base + rva.0 as u64;
+                    mangled_by_va.insert(va, p.name.to_string().into_owned());
+                }
+            }
+        }
+    }
+
     // --- Collect section contributions per module (0-based module index) ---
     let mut module_contribs: HashMap<usize, Vec<(u64, u32)>> = HashMap::new();
     {
@@ -121,7 +136,10 @@ pub fn build_cu_index(
                     continue;
                 }
                 let va = image_base + rva.0 as u64;
-                let name = proc.name.to_string().into_owned();
+                let name = mangled_by_va
+                    .get(&va)
+                    .cloned()
+                    .unwrap_or_else(|| proc.name.to_string().into_owned());
                 let f = PeFunction {
                     name,
                     va,
