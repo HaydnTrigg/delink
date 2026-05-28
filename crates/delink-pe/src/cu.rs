@@ -84,7 +84,11 @@ pub fn build_cu_index(
     pdb_data: &[u8],
     image_base: u64,
     sections: &[PeSection],
-) -> Result<(PeCuIndex, BTreeMap<u64, PeFunction>, BTreeMap<u64, PeVariable>)> {
+) -> Result<(
+    PeCuIndex,
+    BTreeMap<u64, PeFunction>,
+    BTreeMap<u64, PeVariable>,
+)> {
     let cursor = std::io::Cursor::new(pdb_data);
     let mut pdb = pdb::PDB::open(cursor).context("open PDB")?;
 
@@ -222,7 +226,12 @@ pub fn build_cu_index(
                     .map(|&(rva, size, characteristics)| {
                         let va = image_base + rva;
                         let section_name = section_name_for_va(sections, va);
-                        PeContrib { va, size, section_name, characteristics }
+                        PeContrib {
+                            va,
+                            size,
+                            section_name,
+                            characteristics,
+                        }
                     })
                     .collect()
             })

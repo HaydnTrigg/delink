@@ -63,11 +63,7 @@ pub struct RecoveryOutput {
 
 /// Disassemble `bytes` (starting at virtual address `base`) and synthesize
 /// relocations. Offsets in returned relocs are relative to the start of `bytes`.
-pub fn recover(
-    bytes: &[u8],
-    base: u64,
-    symbols: &GlobalSymbols,
-) -> Result<RecoveryOutput> {
+pub fn recover(bytes: &[u8], base: u64, symbols: &GlobalSymbols) -> Result<RecoveryOutput> {
     let cs = Capstone::new()
         .arm64()
         .mode(arm64::ArchMode::Arm)
@@ -75,9 +71,7 @@ pub fn recover(
         .build()
         .context("init capstone aarch64")?;
 
-    let insns = cs
-        .disasm_all(bytes, base)
-        .context("disassemble CU .text")?;
+    let insns = cs.disasm_all(bytes, base).context("disassemble CU .text")?;
 
     let mut out = RecoveryOutput {
         relocs: Vec::new(),
@@ -157,15 +151,7 @@ pub fn recover(
                 if let Some((rd, rn, imm)) = add_imm_operands(&ops) {
                     if let Some(site) = tracker.get(&rn).copied() {
                         let full = site.page_addr.wrapping_add(imm);
-                        emit_adrp_pair(
-                            symbols,
-                            site,
-                            insn_offset,
-                            pc,
-                            full,
-                            LoKind::Add,
-                            &mut out,
-                        );
+                        emit_adrp_pair(symbols, site, insn_offset, pc, full, LoKind::Add, &mut out);
                     }
                     // Whether or not we paired, rd is now clobbered.
                     tracker.remove(&rd);
@@ -181,15 +167,7 @@ pub fn recover(
                     if let Some(site) = tracker.get(&access.base).copied() {
                         let full = site.page_addr.wrapping_add(access.disp as u64);
                         let lo = lo_kind_for_mem(m, &access);
-                        emit_adrp_pair(
-                            symbols,
-                            site,
-                            insn_offset,
-                            pc,
-                            full,
-                            lo,
-                            &mut out,
-                        );
+                        emit_adrp_pair(symbols, site, insn_offset, pc, full, lo, &mut out);
                     }
                 }
                 for r in write_regs(mnemonic, &ops) {
@@ -375,8 +353,12 @@ fn reg_write(ops: &[arm64::Arm64Operand]) -> Option<u32> {
 /// pair — so err toward over-invalidation by treating unrecognized ops
 /// as writing their first register operand.
 fn write_regs(mnemonic: &str, ops: &[arm64::Arm64Operand]) -> Vec<u32> {
-    let num_writes = if mnemonic.starts_with("str") || mnemonic == "stp" || mnemonic == "stnp"
-        || mnemonic == "stur" || mnemonic == "sturb" || mnemonic == "sturh"
+    let num_writes = if mnemonic.starts_with("str")
+        || mnemonic == "stp"
+        || mnemonic == "stnp"
+        || mnemonic == "stur"
+        || mnemonic == "sturb"
+        || mnemonic == "sturh"
     {
         0
     } else if matches!(mnemonic, "cmp" | "cmn" | "tst" | "ccmp" | "ccmn") {
@@ -447,9 +429,19 @@ fn mem_imm_operand(ops: &[arm64::Arm64Operand]) -> Option<MemAccess> {
 fn is_mem_load_or_store(m: &str) -> bool {
     matches!(
         m,
-        "ldr" | "ldrb" | "ldrh" | "ldrsb" | "ldrsh" | "ldrsw" | "ldur"
-            | "str" | "strb" | "strh" | "stur"
-            | "ldp" | "stp"
+        "ldr"
+            | "ldrb"
+            | "ldrh"
+            | "ldrsb"
+            | "ldrsh"
+            | "ldrsw"
+            | "ldur"
+            | "str"
+            | "strb"
+            | "strh"
+            | "stur"
+            | "ldp"
+            | "stp"
     )
 }
 

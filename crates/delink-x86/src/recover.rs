@@ -117,10 +117,7 @@ pub fn recover<R: SymbolResolver>(
                                 out.diag.calls_resolved += 1;
                             }
                             None => {
-                                trace!(
-                                    "{:#x}: unresolved call/jmp target {:#x}",
-                                    pc, target_va
-                                );
+                                trace!("{:#x}: unresolved call/jmp target {:#x}", pc, target_va);
                                 out.diag.calls_unresolved += 1;
                             }
                         }

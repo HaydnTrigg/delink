@@ -123,10 +123,7 @@ pub fn recover<R: SymbolResolver>(
                                 out.diag.calls_resolved += 1;
                             }
                             None => {
-                                trace!(
-                                    "{:#x}: unresolved call/jmp target {:#x}",
-                                    pc, target_va
-                                );
+                                trace!("{:#x}: unresolved call/jmp target {:#x}", pc, target_va);
                                 out.diag.calls_unresolved += 1;
                             }
                         }
@@ -168,10 +165,7 @@ pub fn recover<R: SymbolResolver>(
                     out.diag.rip_refs_resolved += 1;
                 }
                 None => {
-                    trace!(
-                        "{:#x}: unresolved RIP-relative ref to {:#x}",
-                        pc, target_va
-                    );
+                    trace!("{:#x}: unresolved RIP-relative ref to {:#x}", pc, target_va);
                     out.diag.rip_refs_unresolved += 1;
                 }
             }

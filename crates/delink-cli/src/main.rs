@@ -3,7 +3,11 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(name = "so-delink", version, about = "Split a debug .so or .exe into .o/.obj files")]
+#[command(
+    name = "so-delink",
+    version,
+    about = "Split a debug .so or .exe into .o/.obj files"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -68,7 +72,6 @@ enum Cmd {
     // -----------------------------------------------------------------------
     // Windows PE + PDB subcommands
     // -----------------------------------------------------------------------
-
     /// Inspect a Windows PE (.exe) and its PDB: print sections, imports, and CU list.
     PeInspect {
         /// Path to the PE executable (.exe or .dll).
@@ -122,7 +125,11 @@ fn main() -> Result<()> {
             dwarf,
             per_function_sections,
         } => cmd_emit(&input, &cu, &output, comdat, dwarf, per_function_sections),
-        Cmd::ListCus { input, contains, limit } => cmd_list_cus(&input, &contains, limit),
+        Cmd::ListCus {
+            input,
+            contains,
+            limit,
+        } => cmd_list_cus(&input, &contains, limit),
         Cmd::Readobj { input } => cmd_readobj(&input),
         Cmd::EmitShared { input, output } => cmd_emit_shared(&input, &output),
         Cmd::Split {
@@ -133,9 +140,12 @@ fn main() -> Result<()> {
             per_function_sections,
         } => cmd_split(&input, &outdir, comdat, dwarf, per_function_sections),
         Cmd::PeInspect { input, pdb } => cmd_pe_inspect(&input, &pdb),
-        Cmd::PeListCus { input, pdb, contains, limit } => {
-            cmd_pe_list_cus(&input, &pdb, &contains, limit)
-        }
+        Cmd::PeListCus {
+            input,
+            pdb,
+            contains,
+            limit,
+        } => cmd_pe_list_cus(&input, &pdb, &contains, limit),
         Cmd::PeSplit { input, pdb, outdir } => cmd_pe_split(&input, &pdb, &outdir),
     }
 }
@@ -155,7 +165,10 @@ fn cmd_split(
     let symbols = delink_core::symbols::GlobalSymbols::build(&binary, &idx)?;
     tracing::info!(
         "emitting {} CUs in parallel",
-        idx.units.iter().filter(|u| u.functions.iter().any(|f| f.size > 0)).count()
+        idx.units
+            .iter()
+            .filter(|u| u.functions.iter().any(|f| f.size > 0))
+            .count()
     );
     let outcomes = delink_emit::split_all(
         &binary,
@@ -313,7 +326,10 @@ fn cmd_readobj(path: &Path) -> Result<()> {
             };
             println!(
                 "    {:#010x} -> {:<40} addend={:+#x} {}",
-                offset, target_name, rel.addend(), flags
+                offset,
+                target_name,
+                rel.addend(),
+                flags
             );
         }
     }
@@ -352,8 +368,8 @@ fn open_binary<'a>(mmap: &'a memmap2::Mmap, path: &Path) -> Result<delink_core::
 }
 
 fn mmap_file(path: &Path) -> Result<memmap2::Mmap> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     Ok(unsafe { memmap2::Mmap::map(&file)? })
 }
 
@@ -447,10 +463,10 @@ fn cmd_list_cus(path: &Path, contains: &str, limit: usize) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn load_pe_context(exe_path: &Path, pdb_path: &Path) -> Result<delink_pe::PeContext> {
-    let exe_data = std::fs::read(exe_path)
-        .with_context(|| format!("read {}", exe_path.display()))?;
-    let pdb_data = std::fs::read(pdb_path)
-        .with_context(|| format!("read {}", pdb_path.display()))?;
+    let exe_data =
+        std::fs::read(exe_path).with_context(|| format!("read {}", exe_path.display()))?;
+    let pdb_data =
+        std::fs::read(pdb_path).with_context(|| format!("read {}", pdb_path.display()))?;
     tracing::info!(
         "loaded PE ({} bytes) + PDB ({} bytes)",
         exe_data.len(),
@@ -473,8 +489,16 @@ fn cmd_pe_inspect(exe_path: &Path, pdb_path: &Path) -> Result<()> {
     }
 
     println!("\nBase relocations: {} entries", pe.base_relocations.len());
-    let dir64 = pe.base_relocations.iter().filter(|r| matches!(r.kind, delink_pe::BaseRelocKind::Dir64)).count();
-    println!("  DIR64: {}  other: {}", dir64, pe.base_relocations.len() - dir64);
+    let dir64 = pe
+        .base_relocations
+        .iter()
+        .filter(|r| matches!(r.kind, delink_pe::BaseRelocKind::Dir64))
+        .count();
+    println!(
+        "  DIR64: {}  other: {}",
+        dir64,
+        pe.base_relocations.len() - dir64
+    );
 
     println!("\nImports: {} IAT entries", pe.imports.len());
 
@@ -485,12 +509,7 @@ fn cmd_pe_inspect(exe_path: &Path, pdb_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_pe_list_cus(
-    exe_path: &Path,
-    pdb_path: &Path,
-    contains: &str,
-    limit: usize,
-) -> Result<()> {
+fn cmd_pe_list_cus(exe_path: &Path, pdb_path: &Path, contains: &str, limit: usize) -> Result<()> {
     let pe = load_pe_context(exe_path, pdb_path)?;
 
     let mut rows: Vec<_> = pe
@@ -514,7 +533,11 @@ fn cmd_pe_split(exe_path: &Path, pdb_path: &Path, outdir: &Path) -> Result<()> {
 
     tracing::info!(
         "splitting {} CUs (modules with functions) in parallel",
-        pe.cu_index.units.iter().filter(|u| u.functions.iter().any(|f| f.size > 0)).count()
+        pe.cu_index
+            .units
+            .iter()
+            .filter(|u| u.functions.iter().any(|f| f.size > 0))
+            .count()
     );
 
     let outcomes = delink_pe::emit::split_all_pe(&pe, outdir)?;

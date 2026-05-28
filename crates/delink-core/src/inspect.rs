@@ -156,11 +156,21 @@ fn aarch64_reloc_name(t: u32) -> String {
 pub fn format_text(r: &InspectReport) -> String {
     let mut out = String::new();
     writeln!(out, "arch: {}", r.arch).unwrap();
-    writeln!(out, "dwarf: {}", if r.has_dwarf { "present" } else { "MISSING" }).unwrap();
+    writeln!(
+        out,
+        "dwarf: {}",
+        if r.has_dwarf { "present" } else { "MISSING" }
+    )
+    .unwrap();
     writeln!(out).unwrap();
 
     writeln!(out, "SECTIONS").unwrap();
-    writeln!(out, "  {:<28} {:>16} {:>10}  {}", "name", "addr", "size", "kind").unwrap();
+    writeln!(
+        out,
+        "  {:<28} {:>16} {:>10}  {}",
+        "name", "addr", "size", "kind"
+    )
+    .unwrap();
     for s in &r.sections {
         writeln!(
             out,

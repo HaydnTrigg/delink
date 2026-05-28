@@ -69,14 +69,8 @@ impl CuIndex {
         let mut cu_id = 0usize;
         while let Some(header) = headers.next()? {
             let unit = dwarf.unit(header.clone())?;
-            if let Some(cu) = build_unit(
-                dwarf,
-                header,
-                &unit,
-                abbrev_section,
-                line_section,
-                cu_id,
-            )? {
+            if let Some(cu) = build_unit(dwarf, header, &unit, abbrev_section, line_section, cu_id)?
+            {
                 units.push(cu);
                 cu_id += 1;
             }
@@ -109,7 +103,8 @@ fn build_unit<'a>(
         return Ok(None);
     }
 
-    let name = attr_string(dwarf, unit, root, gimli::DW_AT_name)?.unwrap_or_else(|| "<anon>".into());
+    let name =
+        attr_string(dwarf, unit, root, gimli::DW_AT_name)?.unwrap_or_else(|| "<anon>".into());
     let comp_dir = attr_string(dwarf, unit, root, gimli::DW_AT_comp_dir)?;
     let producer = attr_string(dwarf, unit, root, gimli::DW_AT_producer)?;
     let language = match root.attr_value(gimli::DW_AT_language) {
@@ -353,8 +348,12 @@ fn resolve_names_with_refs<'a>(
     entry: &DebuggingInformationEntry<DwarfSlice<'a>>,
 ) -> Result<(Option<String>, Option<String>, bool)> {
     let mut name = attr_string(dwarf, unit, entry, gimli::DW_AT_name)?;
-    let mut linkage = attr_string(dwarf, unit, entry, gimli::DW_AT_linkage_name)?
-        .or(attr_string(dwarf, unit, entry, gimli::DW_AT_MIPS_linkage_name)?);
+    let mut linkage = attr_string(dwarf, unit, entry, gimli::DW_AT_linkage_name)?.or(attr_string(
+        dwarf,
+        unit,
+        entry,
+        gimli::DW_AT_MIPS_linkage_name,
+    )?);
     let mut external = matches!(
         entry.attr_value(gimli::DW_AT_external),
         Some(AttributeValue::Flag(true))
@@ -380,8 +379,9 @@ fn resolve_names_with_refs<'a>(
             name = attr_string(dwarf, unit, &referenced, gimli::DW_AT_name)?;
         }
         if linkage.is_none() {
-            linkage = attr_string(dwarf, unit, &referenced, gimli::DW_AT_linkage_name)?
-                .or(attr_string(dwarf, unit, &referenced, gimli::DW_AT_MIPS_linkage_name)?);
+            linkage = attr_string(dwarf, unit, &referenced, gimli::DW_AT_linkage_name)?.or(
+                attr_string(dwarf, unit, &referenced, gimli::DW_AT_MIPS_linkage_name)?,
+            );
         }
         if !external {
             external = matches!(
@@ -409,7 +409,8 @@ fn extract_variable<'a>(
     let Some(addr) = variable_address(dwarf, unit, entry)? else {
         return Ok(None);
     };
-    let name = attr_string(dwarf, unit, entry, gimli::DW_AT_name)?.unwrap_or_else(|| "<anon>".into());
+    let name =
+        attr_string(dwarf, unit, entry, gimli::DW_AT_name)?.unwrap_or_else(|| "<anon>".into());
     let linkage_name = attr_string(dwarf, unit, entry, gimli::DW_AT_linkage_name)?;
     let external = matches!(
         entry.attr_value(gimli::DW_AT_external),

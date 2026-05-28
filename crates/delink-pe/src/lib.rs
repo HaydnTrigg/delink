@@ -10,7 +10,7 @@ pub mod cu;
 pub mod emit;
 pub mod symbols;
 
-pub use cu::{PeCompilationUnit, PeCuIndex, PeContrib, PeFunction, PeVariable};
+pub use cu::{PeCompilationUnit, PeContrib, PeCuIndex, PeFunction, PeVariable};
 pub use symbols::PeGlobalSymbols;
 
 /// Target architecture of the loaded PE.
@@ -152,8 +152,7 @@ fn parse_pe_sections(exe_data: &[u8]) -> Result<(PeArch, u64, Vec<PeSection>)> {
         return Err(anyhow!("not a PE file (no MZ signature)"));
     }
 
-    let e_lfanew =
-        u32::from_le_bytes(exe_data[0x3c..0x40].try_into().unwrap()) as usize;
+    let e_lfanew = u32::from_le_bytes(exe_data[0x3c..0x40].try_into().unwrap()) as usize;
     if e_lfanew + 4 > exe_data.len() {
         return Err(anyhow!("e_lfanew out of bounds"));
     }
@@ -170,7 +169,12 @@ fn parse_pe_sections(exe_data: &[u8]) -> Result<(PeArch, u64, Vec<PeSection>)> {
     let arch = match machine {
         0x8664 => PeArch::X86_64,
         0x014C => PeArch::X86,
-        other => return Err(anyhow!("unsupported machine type 0x{:04x} (only AMD64 and I386 supported)", other)),
+        other => {
+            return Err(anyhow!(
+                "unsupported machine type 0x{:04x} (only AMD64 and I386 supported)",
+                other
+            ))
+        }
     };
     let num_sections =
         u16::from_le_bytes(exe_data[coff_off + 2..coff_off + 4].try_into().unwrap()) as usize;
@@ -271,8 +275,7 @@ fn parse_base_relocations(sections: &[PeSection], image_base: u64) -> Vec<BaseRe
     let mut relocs = Vec::new();
 
     while offset + 8 <= data.len() {
-        let page_rva =
-            u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as u64;
+        let page_rva = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as u64;
         let block_size =
             u32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap()) as usize;
 
@@ -352,8 +355,11 @@ fn try_parse_imports(
     if import_dir_off + 8 > exe_data.len() {
         return Ok(HashMap::new());
     }
-    let import_rva =
-        u32::from_le_bytes(exe_data[import_dir_off..import_dir_off + 4].try_into().unwrap());
+    let import_rva = u32::from_le_bytes(
+        exe_data[import_dir_off..import_dir_off + 4]
+            .try_into()
+            .unwrap(),
+    );
     if import_rva == 0 {
         return Ok(HashMap::new());
     }
@@ -387,9 +393,11 @@ fn try_parse_imports(
 
         let mut entry_idx = 0u64;
         loop {
-            let Some(thunk_bytes) =
-                rva_slice(sections, hint_rva + entry_idx * thunk_width, thunk_width as usize)
-            else {
+            let Some(thunk_bytes) = rva_slice(
+                sections,
+                hint_rva + entry_idx * thunk_width,
+                thunk_width as usize,
+            ) else {
                 break;
             };
 
