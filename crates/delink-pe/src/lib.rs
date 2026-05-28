@@ -10,7 +10,7 @@ pub mod cu;
 pub mod emit;
 pub mod symbols;
 
-pub use cu::{PeCompilationUnit, PeCuIndex, PeContrib, PeFunction};
+pub use cu::{PeCompilationUnit, PeCuIndex, PeContrib, PeFunction, PeVariable};
 pub use symbols::PeGlobalSymbols;
 
 /// Target architecture of the loaded PE.
@@ -119,9 +119,15 @@ pub fn load_pe_and_pdb(exe_data: &[u8], pdb_data: &[u8]) -> Result<PeContext> {
     let base_relocations = parse_base_relocations(&sections, image_base);
     let imports = parse_imports(exe_data, &sections, image_base, arch);
 
-    let (cu_index, all_functions) = cu::build_cu_index(pdb_data, image_base, &sections)?;
-    let symbols =
-        symbols::PeGlobalSymbols::build(all_functions, &imports, &sections, image_base);
+    let (cu_index, all_functions, all_variables) =
+        cu::build_cu_index(pdb_data, image_base, &sections)?;
+    let symbols = symbols::PeGlobalSymbols::build(
+        all_functions,
+        all_variables,
+        &imports,
+        &sections,
+        image_base,
+    );
 
     Ok(PeContext {
         arch,

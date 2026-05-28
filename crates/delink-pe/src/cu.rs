@@ -19,6 +19,15 @@ pub struct PeFunction {
     pub module_id: usize,
 }
 
+/// A global or static data variable extracted from the PDB.
+#[derive(Debug, Clone)]
+pub struct PeVariable {
+    pub name: String,
+    pub va: u64,
+    /// True for `S_GDATA32` (global) vs `S_LDATA32` (file-static).
+    pub is_public: bool,
+}
+
 /// A byte range of a PE section that belongs to one PDB module.
 #[derive(Debug, Clone)]
 pub struct PeContrib {
@@ -62,7 +71,7 @@ pub struct PeCuIndex {
     pub units: Vec<PeCompilationUnit>,
 }
 
-/// Parse a PDB and return `(CuIndex, all_functions_by_VA)`.
+/// Parse a PDB and return `(CuIndex, all_functions_by_VA, all_variables_by_VA)`.
 ///
 /// `image_base` is from the PE optional header; `sections` are the PE
 /// sections (needed to look up section names for contributions).
@@ -70,7 +79,7 @@ pub fn build_cu_index(
     pdb_data: &[u8],
     image_base: u64,
     sections: &[PeSection],
-) -> Result<(PeCuIndex, BTreeMap<u64, PeFunction>)> {
+) -> Result<(PeCuIndex, BTreeMap<u64, PeFunction>, BTreeMap<u64, PeVariable>)> {
     let cursor = std::io::Cursor::new(pdb_data);
     let mut pdb = pdb::PDB::open(cursor).context("open PDB")?;
 
@@ -78,6 +87,8 @@ pub fn build_cu_index(
     let address_map = pdb.address_map().context("PDB address map")?;
 
     // --- Build VA → mangled name from the public symbols stream ---
+    // Public symbols (S_PUB32) carry decorated/mangled names for both
+    // functions and data; we prefer these over the undecorated module names.
     let mut mangled_by_va: HashMap<u64, String> = HashMap::new();
     {
         let global_syms = pdb.global_symbols().context("PDB global symbols")?;
@@ -112,6 +123,7 @@ pub fn build_cu_index(
     // --- Walk modules ---
     let mut units: Vec<PeCompilationUnit> = Vec::new();
     let mut all_functions: BTreeMap<u64, PeFunction> = BTreeMap::new();
+    let mut all_variables: BTreeMap<u64, PeVariable> = BTreeMap::new();
     let mut cu_id = 0usize;
     let mut mod_index = 0usize;
 
@@ -125,30 +137,50 @@ pub fn build_cu_index(
         if let Some(mod_info) = pdb.module_info(&module).context("module info")? {
             let mut sym_iter = mod_info.symbols().context("module symbols")?;
             while let Some(sym) = sym_iter.next()? {
-                let proc = match sym.parse() {
-                    Ok(pdb::SymbolData::Procedure(p)) => p,
-                    _ => continue,
-                };
-                let Some(rva) = proc.offset.to_rva(&address_map) else {
-                    continue;
-                };
-                if rva.0 == 0 || proc.len == 0 {
-                    continue;
+                match sym.parse() {
+                    Ok(pdb::SymbolData::Procedure(p)) => {
+                        let Some(rva) = p.offset.to_rva(&address_map) else {
+                            continue;
+                        };
+                        if rva.0 == 0 || p.len == 0 {
+                            continue;
+                        }
+                        let va = image_base + rva.0 as u64;
+                        let name = mangled_by_va
+                            .get(&va)
+                            .cloned()
+                            .unwrap_or_else(|| p.name.to_string().into_owned());
+                        let f = PeFunction {
+                            name,
+                            va,
+                            size: p.len,
+                            is_public: p.global,
+                            module_id: cu_id,
+                        };
+                        all_functions.entry(va).or_insert_with(|| f.clone());
+                        functions.push(f);
+                    }
+                    Ok(pdb::SymbolData::Data(d)) => {
+                        let Some(rva) = d.offset.to_rva(&address_map) else {
+                            continue;
+                        };
+                        if rva.0 == 0 {
+                            continue;
+                        }
+                        let va = image_base + rva.0 as u64;
+                        let name = mangled_by_va
+                            .get(&va)
+                            .cloned()
+                            .unwrap_or_else(|| d.name.to_string().into_owned());
+                        let v = PeVariable {
+                            name,
+                            va,
+                            is_public: d.global,
+                        };
+                        all_variables.entry(va).or_insert_with(|| v);
+                    }
+                    _ => {}
                 }
-                let va = image_base + rva.0 as u64;
-                let name = mangled_by_va
-                    .get(&va)
-                    .cloned()
-                    .unwrap_or_else(|| proc.name.to_string().into_owned());
-                let f = PeFunction {
-                    name,
-                    va,
-                    size: proc.len,
-                    is_public: proc.global,
-                    module_id: cu_id,
-                };
-                all_functions.entry(va).or_insert_with(|| f.clone());
-                functions.push(f);
             }
         }
 
@@ -181,7 +213,7 @@ pub fn build_cu_index(
         mod_index += 1;
     }
 
-    Ok((PeCuIndex { units }, all_functions))
+    Ok((PeCuIndex { units }, all_functions, all_variables))
 }
 
 fn section_name_for_va(sections: &[PeSection], va: u64) -> String {

@@ -1,13 +1,15 @@
-//! Global symbol resolver for x86-64 PE relocation recovery.
+//! Global symbol resolver for x86-64 and x86 PE relocation recovery.
 
-use crate::cu::PeFunction;
+use crate::cu::{PeFunction, PeVariable};
 use crate::PeSection;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
 pub struct PeGlobalSymbols {
-    /// VA → function descriptor (from PDB).
+    /// VA → function descriptor (from PDB procedures).
     pub functions: BTreeMap<u64, PeFunction>,
+    /// VA → data variable descriptor (from PDB S_GDATA32 / S_LDATA32).
+    pub variables: BTreeMap<u64, PeVariable>,
     /// IAT slot VA → `"__imp_funcname"` (from PE import table).
     pub imports: HashMap<u64, String>,
     /// Well-known data section ranges for section-relative fallbacks.
@@ -21,6 +23,7 @@ pub struct PeGlobalSymbols {
 impl PeGlobalSymbols {
     pub fn build(
         functions: BTreeMap<u64, PeFunction>,
+        variables: BTreeMap<u64, PeVariable>,
         imports: &HashMap<u64, String>,
         sections: &[PeSection],
         _image_base: u64,
@@ -34,6 +37,7 @@ impl PeGlobalSymbols {
 
         Self {
             functions,
+            variables,
             imports: imports.clone(),
             text_range: section_range(".text"),
             rdata_range: section_range(".rdata"),
@@ -62,23 +66,28 @@ impl PeGlobalSymbols {
         None
     }
 
-    /// Resolve a data reference VA (from RIP-relative addressing) to `(symbol, addend)`.
+    /// Resolve a data reference VA (RIP-relative or absolute pointer) to `(symbol, addend)`.
     pub fn resolve_data(&self, va: u64) -> Option<(String, i64)> {
         // IAT slot → __imp_funcname.
         if let Some(name) = self.imports.get(&va) {
             return Some((name.clone(), 0));
         }
-        // Exact function or variable.
+        // Exact named variable.
+        if let Some(v) = self.variables.get(&va) {
+            return Some((v.name.clone(), 0));
+        }
+        // Exact function or data label.
         if let Some(f) = self.functions.get(&va) {
             return Some((f.name.clone(), 0));
         }
-        // Interior of a function.
+        // Interior of a function (e.g. reference into a jump table or literal pool
+        // that lives inside a function's address range in the PDB).
         if let Some((start, f)) = self.functions.range(..=va).next_back() {
             if va < *start + f.size as u64 {
                 return Some((f.name.clone(), (va - *start) as i64));
             }
         }
-        // Section-relative fallback.
+        // Section-relative fallback for anonymous data.
         self.section_relative(va)
     }
 
