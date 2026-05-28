@@ -89,7 +89,10 @@ pub fn build_cu_index(
     // --- Build VA → mangled name from the public symbols stream ---
     // Public symbols (S_PUB32) carry decorated/mangled names for both
     // functions and data; we prefer these over the undecorated module names.
+    // Data-typed public symbols (not code, not function) are also collected
+    // separately so they can fill gaps where no S_GDATA32/S_LDATA32 exists.
     let mut mangled_by_va: HashMap<u64, String> = HashMap::new();
+    let mut public_data_by_va: HashMap<u64, String> = HashMap::new();
     {
         let global_syms = pdb.global_symbols().context("PDB global symbols")?;
         let mut iter = global_syms.iter();
@@ -97,7 +100,11 @@ pub fn build_cu_index(
             if let Ok(pdb::SymbolData::Public(p)) = sym.parse() {
                 if let Some(rva) = p.offset.to_rva(&address_map) {
                     let va = image_base + rva.0 as u64;
-                    mangled_by_va.insert(va, p.name.to_string().into_owned());
+                    let name = p.name.to_string().into_owned();
+                    mangled_by_va.insert(va, name.clone());
+                    if !p.function && !p.code {
+                        public_data_by_va.insert(va, name);
+                    }
                 }
             }
         }
@@ -179,6 +186,24 @@ pub fn build_cu_index(
                         };
                         all_variables.entry(va).or_insert_with(|| v);
                     }
+                    Ok(pdb::SymbolData::Label(l)) => {
+                        let Some(rva) = l.offset.to_rva(&address_map) else {
+                            continue;
+                        };
+                        if rva.0 == 0 {
+                            continue;
+                        }
+                        let va = image_base + rva.0 as u64;
+                        let name = mangled_by_va
+                            .get(&va)
+                            .cloned()
+                            .unwrap_or_else(|| l.name.to_string().into_owned());
+                        all_variables.entry(va).or_insert_with(|| PeVariable {
+                            name,
+                            va,
+                            is_public: false,
+                        });
+                    }
                     _ => {}
                 }
             }
@@ -211,6 +236,17 @@ pub fn build_cu_index(
         }
 
         mod_index += 1;
+    }
+
+    // Add public data symbols as fallbacks for any VA not already covered by a
+    // module-level S_GDATA32, S_LDATA32, or S_LABEL32 entry.  These are symbols
+    // that appear only in the global stream and have no per-module record.
+    for (va, name) in public_data_by_va {
+        all_variables.entry(va).or_insert_with(|| PeVariable {
+            name,
+            va,
+            is_public: true,
+        });
     }
 
     Ok((PeCuIndex { units }, all_functions, all_variables))

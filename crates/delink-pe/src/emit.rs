@@ -186,6 +186,25 @@ pub fn emit_pe_cu(
                 });
                 local_syms.insert(f.name.clone(), sym_id);
 
+                // Emit symbols for data labels embedded within this function's body.
+                for (var_va, var) in pe.symbols.variables.range(f.va..f.va + f.size as u64) {
+                    if *var_va == f.va {
+                        continue;
+                    }
+                    let label_scope = if var.is_public { SymbolScope::Dynamic } else { SymbolScope::Compilation };
+                    let label_id = obj.add_symbol(Symbol {
+                        name: var.name.as_bytes().to_vec(),
+                        value: fn_offset + (var_va - f.va),
+                        size: 0,
+                        kind: SymbolKind::Label,
+                        scope: label_scope,
+                        weak: false,
+                        section: SymbolSection::Section(sid),
+                        flags: SymbolFlags::None,
+                    });
+                    local_syms.insert(var.name.clone(), label_id);
+                }
+
                 for (off, sym, addend, typ) in staged {
                     obj.add_relocation(
                         sid,
@@ -276,6 +295,25 @@ pub fn emit_pe_cu(
                 });
                 local_syms.insert(f.name.clone(), sym_id);
 
+                // Emit symbols for data labels embedded within this function's body.
+                for (var_va, var) in pe.symbols.variables.range(f.va..f.va + f.size as u64) {
+                    if *var_va == f.va {
+                        continue;
+                    }
+                    let label_scope = if var.is_public { SymbolScope::Dynamic } else { SymbolScope::Compilation };
+                    let label_id = obj.add_symbol(Symbol {
+                        name: var.name.as_bytes().to_vec(),
+                        value: fn_offset + (var_va - f.va),
+                        size: 0,
+                        kind: SymbolKind::Label,
+                        scope: label_scope,
+                        weak: false,
+                        section: SymbolSection::Section(sid),
+                        flags: SymbolFlags::None,
+                    });
+                    local_syms.insert(var.name.clone(), label_id);
+                }
+
                 for (off, sym, addend, typ) in staged {
                     obj.add_relocation(
                         sid,
@@ -306,6 +344,115 @@ pub fn emit_pe_cu(
                     total_relocs += 1;
                 }
             }
+        }
+    }
+
+    // Emit non-.text section contributions for this CU (e.g. .rdata, .data, .bss).
+    let (pointer_width, abs_reloc_typ) = match pe.arch {
+        PeArch::X86_64 => (8usize, REL_AMD64_ADDR64),
+        PeArch::X86 => (4usize, REL_I386_DIR32),
+    };
+    for contrib in cu.contributions.iter().filter(|c| c.section_name != ".text") {
+        let Some(pe_section) = pe.sections.iter().find(|s| s.name == contrib.section_name) else {
+            continue;
+        };
+
+        const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
+        const IMAGE_SCN_CNT_UNINIT: u32 = 0x0000_0080;
+        let kind = if pe_section.characteristics & IMAGE_SCN_MEM_WRITE != 0
+            && pe_section.characteristics & IMAGE_SCN_CNT_UNINIT != 0
+        {
+            SectionKind::UninitializedData
+        } else if pe_section.characteristics & IMAGE_SCN_MEM_WRITE != 0 {
+            SectionKind::Data
+        } else {
+            SectionKind::ReadOnlyData
+        };
+
+        let data_sid =
+            obj.add_section(Vec::new(), contrib.section_name.as_bytes().to_vec(), kind);
+
+        let section_base: u64;
+
+        if kind == SectionKind::UninitializedData {
+            obj.section_mut(data_sid).append_bss(contrib.size as u64, 1);
+            section_base = 0;
+        } else {
+            let start = (contrib.va - pe_section.va) as usize;
+            let end = (start + contrib.size as usize).min(pe_section.data.len());
+            let mut contrib_bytes = pe_section.data[start..end].to_vec();
+
+            // Zero base-reloc slots and stage their relocations.
+            let mut staged_data: Vec<(u64, SymbolId, i64, u16)> = Vec::new();
+            for br in &pe.base_relocations {
+                let matches = match (&pe.arch, &br.kind) {
+                    (PeArch::X86_64, BaseRelocKind::Dir64) => true,
+                    (PeArch::X86, BaseRelocKind::HighLow) => true,
+                    _ => false,
+                };
+                if !matches {
+                    continue;
+                }
+                if br.va < contrib.va
+                    || br.va + pointer_width as u64 > contrib.va + contrib.size as u64
+                {
+                    continue;
+                }
+                let off = (br.va - contrib.va) as usize;
+                if off + pointer_width > contrib_bytes.len() {
+                    continue;
+                }
+                let target_va: u64 = match pointer_width {
+                    8 => u64::from_le_bytes(contrib_bytes[off..off + 8].try_into().unwrap()),
+                    4 => u32::from_le_bytes(contrib_bytes[off..off + 4].try_into().unwrap()) as u64,
+                    _ => unreachable!(),
+                };
+                contrib_bytes[off..off + pointer_width].fill(0);
+                if let Some((sym_name, addend)) = pe.symbols.resolve_data(target_va) {
+                    let sym = resolve_or_add_undef(&mut obj, &mut undef_cache, &sym_name);
+                    staged_data.push((off as u64, sym, addend, abs_reloc_typ));
+                }
+            }
+
+            section_base = obj.append_section_data(data_sid, &contrib_bytes, 1);
+
+            for (off, sym, addend, typ) in staged_data {
+                obj.add_relocation(
+                    data_sid,
+                    Relocation {
+                        offset: section_base + off,
+                        symbol: sym,
+                        addend,
+                        flags: RelocationFlags::Coff { typ },
+                    },
+                )
+                .with_context(|| format!("add data reloc at {:#x}", contrib.va + off))?;
+                total_relocs += 1;
+            }
+        }
+
+        // Emit variable symbols for this contribution's address range.
+        for (var_va, var) in pe
+            .symbols
+            .variables
+            .range(contrib.va..contrib.va + contrib.size as u64)
+        {
+            let offset = section_base + (var_va - contrib.va);
+            let scope = if var.is_public {
+                SymbolScope::Dynamic
+            } else {
+                SymbolScope::Compilation
+            };
+            obj.add_symbol(Symbol {
+                name: var.name.as_bytes().to_vec(),
+                value: offset,
+                size: 0,
+                kind: SymbolKind::Data,
+                scope,
+                weak: false,
+                section: SymbolSection::Section(data_sid),
+                flags: SymbolFlags::None,
+            });
         }
     }
 
@@ -455,10 +602,33 @@ pub fn emit_pe_shared(pe: &PeContext, out_path: &Path) -> Result<SharedDataStats
         }
     }
 
+    // Collect VAs of variables already defined in per-CU objects (non-.text
+    // contributions from CUs that have at least one function).  We must not
+    // re-define them here or the linker will report multiply-defined symbols.
+    let claimed_vas: std::collections::HashSet<u64> = pe
+        .cu_index
+        .units
+        .iter()
+        .filter(|u| u.functions.iter().any(|f| f.size > 0))
+        .flat_map(|u| {
+            u.contributions
+                .iter()
+                .filter(|c| c.section_name != ".text")
+                .flat_map(|c| {
+                    pe.symbols
+                        .variables
+                        .range(c.va..c.va + c.size as u64)
+                        .map(|(va, _)| *va)
+                })
+        })
+        .collect();
+
     // Emit a COFF symbol for each named data variable that falls inside one of
-    // our data sections.  These let other object files (and the linker) resolve
-    // references to global/static variables by name rather than by raw offset.
+    // our data sections and was not already exported in a per-CU object.
     for (va, var) in &pe.symbols.variables {
+        if claimed_vas.contains(va) {
+            continue;
+        }
         let Some(slot) = slots.iter().find(|s| *va >= s.va && *va < s.va + s.size) else {
             continue; // variable lives outside our data sections (e.g. in .text)
         };
