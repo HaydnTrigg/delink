@@ -120,10 +120,7 @@ pub fn emit_cu(binary: &Binary<'_>, opts: EmitOptions<'_>, out_path: &Path) -> R
     };
 
     for f in &live_functions {
-        let raw_name = f
-            .linkage_name
-            .as_deref()
-            .unwrap_or(f.name.as_str());
+        let raw_name = f.linkage_name.as_deref().unwrap_or(f.name.as_str());
         let name = if raw_name.is_empty() || raw_name == "<anon>" {
             format!("__delink_sub_{:x}", f.addr)
         } else {
@@ -140,11 +137,7 @@ pub fn emit_cu(binary: &Binary<'_>, opts: EmitOptions<'_>, out_path: &Path) -> R
             }
             None => {
                 let section_name = format!(".text.{}", sanitize_section_suffix(&name));
-                let sid = obj.add_section(
-                    Vec::new(),
-                    section_name.into_bytes(),
-                    SectionKind::Text,
-                );
+                let sid = obj.add_section(Vec::new(), section_name.into_bytes(), SectionKind::Text);
                 obj.append_section_data(sid, &text_data[start..end], 4);
                 (sid, 0)
             }
@@ -233,24 +226,20 @@ pub fn emit_cu(binary: &Binary<'_>, opts: EmitOptions<'_>, out_path: &Path) -> R
     }
 
     if opts.dwarf {
-        let (debug_info_section, debug_info_slice) = add_dwarf_slice(
-            &mut obj,
-            binary,
-            ".debug_info",
-            cu.debug_info_range.clone(),
-        );
+        let (debug_info_section, debug_info_slice) =
+            add_dwarf_slice(&mut obj, binary, ".debug_info", cu.debug_info_range.clone());
         add_dwarf_slice(
             &mut obj,
             binary,
             ".debug_abbrev",
             cu.debug_abbrev_range.clone(),
         );
-        let (debug_line_section, debug_line_slice) = if let Some(range) = cu.debug_line_range.clone()
-        {
-            add_dwarf_slice(&mut obj, binary, ".debug_line", range)
-        } else {
-            (None, None)
-        };
+        let (debug_line_section, debug_line_slice) =
+            if let Some(range) = cu.debug_line_range.clone() {
+                add_dwarf_slice(&mut obj, binary, ".debug_line", range)
+            } else {
+                (None, None)
+            };
 
         if let (Some(info_section), Some(info_slice), Some(abbrev_slice)) = (
             debug_info_section,
@@ -295,10 +284,12 @@ pub fn emit_cu(binary: &Binary<'_>, opts: EmitOptions<'_>, out_path: &Path) -> R
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(out_path, &bytes)
-        .with_context(|| format!("write {}", out_path.display()))?;
+    std::fs::write(out_path, &bytes).with_context(|| format!("write {}", out_path.display()))?;
 
-    let dwarf_bytes = (cu.debug_info_range.end.saturating_sub(cu.debug_info_range.start)
+    let dwarf_bytes = (cu
+        .debug_info_range
+        .end
+        .saturating_sub(cu.debug_info_range.start)
         + cu.debug_abbrev_range
             .end
             .saturating_sub(cu.debug_abbrev_range.start)
@@ -600,8 +591,14 @@ pub fn emit_shared_data(
             obj.add_section(Vec::new(), b".eh_frame".to_vec(), SectionKind::ReadOnlyData);
         obj.append_section_data(section_id, data, 8);
         stats.eh_frame_bytes = data.len() as u64;
-        stats.fde_relocs =
-            translate_eh_frame(&mut obj, section_id, data, section.address(), symbols, &mut undef_cache)?;
+        stats.fde_relocs = translate_eh_frame(
+            &mut obj,
+            section_id,
+            data,
+            section.address(),
+            symbols,
+            &mut undef_cache,
+        )?;
     }
 
     // DWARF sections that are shared across all per-CU `.o`s go here. Per-CU
@@ -617,75 +614,74 @@ pub fn emit_shared_data(
     if !opts.dwarf {
         // Skip DWARF emission entirely in shared data too.
     } else {
-    for dwarf_shared in [
-        ".debug_str",
-        ".debug_line_str",
-        ".debug_str_offsets",
-        ".debug_ranges",
-        ".debug_rnglists",
-        ".debug_loc",
-        ".debug_loclists",
-        ".debug_addr",
-    ] {
-        if let Some(section) = binary.elf.section_by_name(dwarf_shared) {
-            let data = section.data().unwrap_or(&[]);
-            if data.is_empty() {
-                continue;
-            }
-            let kind = if dwarf_shared == ".debug_str" || dwarf_shared == ".debug_line_str" {
-                SectionKind::DebugString
-            } else {
-                SectionKind::Debug
-            };
-            let sid =
-                obj.add_section(Vec::new(), dwarf_shared.as_bytes().to_vec(), kind);
-            obj.append_section_data(sid, data, 1);
-            stats.dwarf_shared_bytes += data.len() as u64;
+        for dwarf_shared in [
+            ".debug_str",
+            ".debug_line_str",
+            ".debug_str_offsets",
+            ".debug_ranges",
+            ".debug_rnglists",
+            ".debug_loc",
+            ".debug_loclists",
+            ".debug_addr",
+        ] {
+            if let Some(section) = binary.elf.section_by_name(dwarf_shared) {
+                let data = section.data().unwrap_or(&[]);
+                if data.is_empty() {
+                    continue;
+                }
+                let kind = if dwarf_shared == ".debug_str" || dwarf_shared == ".debug_line_str" {
+                    SectionKind::DebugString
+                } else {
+                    SectionKind::Debug
+                };
+                let sid = obj.add_section(Vec::new(), dwarf_shared.as_bytes().to_vec(), kind);
+                obj.append_section_data(sid, data, 1);
+                stats.dwarf_shared_bytes += data.len() as u64;
 
-            let start_sym = match dwarf_shared {
-                ".debug_str" => Some("__delink_debug_str_start"),
-                ".debug_line_str" => Some("__delink_debug_line_str_start"),
-                ".debug_ranges" => Some("__delink_debug_ranges_start"),
-                ".debug_rnglists" => Some("__delink_debug_rnglists_start"),
-                ".debug_loc" => Some("__delink_debug_loc_start"),
-                ".debug_loclists" => Some("__delink_debug_loclists_start"),
-                _ => None,
-            };
-            if let Some(sym) = start_sym {
-                obj.add_symbol(Symbol {
-                    name: sym.as_bytes().to_vec(),
-                    value: 0,
-                    size: 0,
-                    kind: SymbolKind::Data,
-                    scope: SymbolScope::Dynamic,
-                    weak: false,
-                    section: SymbolSection::Section(sid),
-                    flags: SymbolFlags::None,
-                });
-            }
+                let start_sym = match dwarf_shared {
+                    ".debug_str" => Some("__delink_debug_str_start"),
+                    ".debug_line_str" => Some("__delink_debug_line_str_start"),
+                    ".debug_ranges" => Some("__delink_debug_ranges_start"),
+                    ".debug_rnglists" => Some("__delink_debug_rnglists_start"),
+                    ".debug_loc" => Some("__delink_debug_loc_start"),
+                    ".debug_loclists" => Some("__delink_debug_loclists_start"),
+                    _ => None,
+                };
+                if let Some(sym) = start_sym {
+                    obj.add_symbol(Symbol {
+                        name: sym.as_bytes().to_vec(),
+                        value: 0,
+                        size: 0,
+                        kind: SymbolKind::Data,
+                        scope: SymbolScope::Dynamic,
+                        weak: false,
+                        section: SymbolSection::Section(sid),
+                        flags: SymbolFlags::None,
+                    });
+                }
 
-            if dwarf_shared == ".debug_ranges" {
-                debug_ranges_info = Some((sid, data));
-            } else if dwarf_shared == ".debug_loc" {
-                debug_loc_info = Some((sid, data));
+                if dwarf_shared == ".debug_ranges" {
+                    debug_ranges_info = Some((sid, data));
+                } else if dwarf_shared == ".debug_loc" {
+                    debug_loc_info = Some((sid, data));
+                }
             }
         }
-    }
 
-    if let Some((sid, data)) = debug_ranges_info {
-        let (recs, diag) = dwarf_relocs::scan_debug_ranges(data, 8, symbols);
-        for r in recs {
-            attach_dwarf_reloc(&mut obj, sid, &mut HashMap::new(), &mut undef_cache, &r)?;
+        if let Some((sid, data)) = debug_ranges_info {
+            let (recs, diag) = dwarf_relocs::scan_debug_ranges(data, 8, symbols);
+            for r in recs {
+                attach_dwarf_reloc(&mut obj, sid, &mut HashMap::new(), &mut undef_cache, &r)?;
+            }
+            stats.debug_ranges_relocs = diag.range_pairs_resolved;
         }
-        stats.debug_ranges_relocs = diag.range_pairs_resolved;
-    }
-    if let Some((sid, data)) = debug_loc_info {
-        let (recs, diag) = dwarf_relocs::scan_debug_loc(data, 8, symbols);
-        for r in recs {
-            attach_dwarf_reloc(&mut obj, sid, &mut HashMap::new(), &mut undef_cache, &r)?;
+        if let Some((sid, data)) = debug_loc_info {
+            let (recs, diag) = dwarf_relocs::scan_debug_loc(data, 8, symbols);
+            for r in recs {
+                attach_dwarf_reloc(&mut obj, sid, &mut HashMap::new(), &mut undef_cache, &r)?;
+            }
+            stats.debug_loc_relocs = diag.loc_pairs_resolved;
         }
-        stats.debug_loc_relocs = diag.loc_pairs_resolved;
-    }
     } // end if opts.dwarf
 
     // Emit every DWARF-named global as a defined symbol in the section
@@ -733,8 +729,7 @@ pub fn emit_shared_data(
         let translated = match classify_dyn_reloc(rel) {
             DynClass::Relative => {
                 let target_addr = rel.r_addend as u64;
-                resolve_target_name(symbols, target_addr)
-                    .map(|(name, addend)| (name, addend))
+                resolve_target_name(symbols, target_addr).map(|(name, addend)| (name, addend))
             }
             DynClass::Abs64 => Some((rel.sym_name.clone(), rel.r_addend)),
             DynClass::GlobDat => Some((rel.sym_name.clone(), rel.r_addend)),
@@ -783,8 +778,7 @@ pub fn emit_shared_data(
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(out_path, &bytes)
-        .with_context(|| format!("write {}", out_path.display()))?;
+    std::fs::write(out_path, &bytes).with_context(|| format!("write {}", out_path.display()))?;
 
     Ok(stats)
 }
@@ -831,7 +825,11 @@ fn translate_eh_frame(
 
         // The second u32 is CIE_id (for CIEs) or CIE_pointer (for FDEs).
         // CIE_id == 0 → this is a CIE; anything else → FDE.
-        let cie_id = u32::from_le_bytes(data[record_header_end..record_header_end + 4].try_into().unwrap());
+        let cie_id = u32::from_le_bytes(
+            data[record_header_end..record_header_end + 4]
+                .try_into()
+                .unwrap(),
+        );
         if cie_id != 0 {
             // FDE: pc_begin follows at record_start + 8.
             let pc_begin_field_off = record_start + 8;
@@ -994,8 +992,7 @@ pub fn split_all(
     per_function_sections: bool,
 ) -> Result<Vec<CuOutcome>> {
     use rayon::prelude::*;
-    std::fs::create_dir_all(out_dir)
-        .with_context(|| format!("create {}", out_dir.display()))?;
+    std::fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
 
     let outcomes: Vec<CuOutcome> = idx
         .units

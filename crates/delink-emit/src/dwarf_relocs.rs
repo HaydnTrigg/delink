@@ -89,8 +89,8 @@ pub fn scan_debug_info(
     let mut relocs = Vec::new();
     let mut diag = DwarfRelocDiag::default();
 
-    let (header_size, addr_size, offset_size) = parse_cu_header(slice)
-        .ok_or_else(|| anyhow!("failed to parse CU header"))?;
+    let (header_size, addr_size, offset_size) =
+        parse_cu_header(slice).ok_or_else(|| anyhow!("failed to parse CU header"))?;
 
     let abbrevs = parse_abbrev_table(abbrev_slice)?;
     let mut cursor = header_size;
@@ -129,7 +129,8 @@ pub fn scan_debug_info(
                     let addr = read_addr(&slice[cursor..], addr_size);
                     if attr.attr == 0x11 /* DW_AT_low_pc */
                         || attr.attr == 0x12 /* DW_AT_high_pc (as addr: end) */
-                        || attr.attr == 0x52 /* DW_AT_entry_pc */
+                        || attr.attr == 0x52
+                    /* DW_AT_entry_pc */
                     {
                         if addr != 0 {
                             match resolve_addr(symbols, addr) {
@@ -197,7 +198,9 @@ pub fn scan_debug_line(
             let ext_start = cursor;
             let sub = slice[cursor];
             cursor += 1;
-            if sub == 0x02 /* DW_LNE_set_address */ {
+            if sub == 0x02
+            /* DW_LNE_set_address */
+            {
                 let addr = read_addr(&slice[cursor..], header.address_size);
                 if addr != 0 {
                     match resolve_addr(symbols, addr) {
@@ -250,7 +253,11 @@ pub fn scan_debug_ranges(
     if step == 0 || section.len() < pair {
         return (relocs, diag);
     }
-    let top = if addr_size == 8 { u64::MAX } else { u32::MAX as u64 };
+    let top = if addr_size == 8 {
+        u64::MAX
+    } else {
+        u32::MAX as u64
+    };
     let mut cursor = 0usize;
     while cursor + pair <= section.len() {
         let start = read_addr(&section[cursor..], addr_size);
@@ -264,7 +271,15 @@ pub fn scan_debug_ranges(
             cursor += pair;
             continue;
         }
-        emit_addr_pair(&mut relocs, &mut diag, symbols, cursor, cursor + step, start, end);
+        emit_addr_pair(
+            &mut relocs,
+            &mut diag,
+            symbols,
+            cursor,
+            cursor + step,
+            start,
+            end,
+        );
         cursor += pair;
     }
     (relocs, diag)
@@ -289,7 +304,11 @@ pub fn scan_debug_loc(
     if step == 0 || section.len() < pair {
         return (relocs, diag);
     }
-    let top = if addr_size == 8 { u64::MAX } else { u32::MAX as u64 };
+    let top = if addr_size == 8 {
+        u64::MAX
+    } else {
+        u32::MAX as u64
+    };
     let mut cursor = 0usize;
     while cursor + pair <= section.len() {
         let start = read_addr(&section[cursor..], addr_size);
@@ -303,7 +322,15 @@ pub fn scan_debug_loc(
             cursor += pair;
             continue;
         }
-        emit_loc_pair(&mut relocs, &mut diag, symbols, cursor, cursor + step, start, end);
+        emit_loc_pair(
+            &mut relocs,
+            &mut diag,
+            symbols,
+            cursor,
+            cursor + step,
+            start,
+            end,
+        );
         // Skip length + expression.
         if cursor + pair + 2 > section.len() {
             break;
@@ -341,7 +368,11 @@ fn emit_addr_pair(
     // For the end address, a common case is `start + size` of the same
     // function. Try an interior lookup so we emit the reloc with an
     // appropriate addend into the owning function.
-    let end_ref = if end == 0 { None } else { resolve_addr_including_end(symbols, end) };
+    let end_ref = if end == 0 {
+        None
+    } else {
+        resolve_addr_including_end(symbols, end)
+    };
     if let Some((name, addend)) = end_ref {
         relocs.push(DwarfReloc::Abs64 {
             offset: end_off as u64,
@@ -373,7 +404,11 @@ fn emit_loc_pair(
         }
         None => diag.loc_pairs_missing += 1,
     }
-    let end_ref = if end == 0 { None } else { resolve_addr_including_end(symbols, end) };
+    let end_ref = if end == 0 {
+        None
+    } else {
+        resolve_addr_including_end(symbols, end)
+    };
     if let Some((name, addend)) = end_ref {
         relocs.push(DwarfReloc::Abs64 {
             offset: end_off as u64,
@@ -519,14 +554,12 @@ fn parse_abbrev_table(bytes: &[u8]) -> Result<AbbrevMap> {
     let mut map = HashMap::new();
     let mut cursor = 0usize;
     while cursor < bytes.len() {
-        let (code, n) = read_uleb128(&bytes[cursor..])
-            .ok_or_else(|| anyhow!("bad abbrev code"))?;
+        let (code, n) = read_uleb128(&bytes[cursor..]).ok_or_else(|| anyhow!("bad abbrev code"))?;
         cursor += n;
         if code == 0 {
             break;
         }
-        let (tag, n) = read_uleb128(&bytes[cursor..])
-            .ok_or_else(|| anyhow!("bad abbrev tag"))?;
+        let (tag, n) = read_uleb128(&bytes[cursor..]).ok_or_else(|| anyhow!("bad abbrev tag"))?;
         cursor += n;
         if cursor >= bytes.len() {
             bail!("truncated abbrev: missing has_children flag");
@@ -535,18 +568,18 @@ fn parse_abbrev_table(bytes: &[u8]) -> Result<AbbrevMap> {
         cursor += 1;
         let mut attrs = Vec::new();
         loop {
-            let (attr, n) = read_uleb128(&bytes[cursor..])
-                .ok_or_else(|| anyhow!("bad abbrev attr"))?;
+            let (attr, n) =
+                read_uleb128(&bytes[cursor..]).ok_or_else(|| anyhow!("bad abbrev attr"))?;
             cursor += n;
-            let (form, n) = read_uleb128(&bytes[cursor..])
-                .ok_or_else(|| anyhow!("bad abbrev form"))?;
+            let (form, n) =
+                read_uleb128(&bytes[cursor..]).ok_or_else(|| anyhow!("bad abbrev form"))?;
             cursor += n;
             if attr == 0 && form == 0 {
                 break;
             }
             let implicit_const = if form == 0x21 {
-                let (v, n) = read_sleb128(&bytes[cursor..])
-                    .ok_or_else(|| anyhow!("bad implicit_const"))?;
+                let (v, n) =
+                    read_sleb128(&bytes[cursor..]).ok_or_else(|| anyhow!("bad implicit_const"))?;
                 cursor += n;
                 Some(v)
             } else {
@@ -575,22 +608,26 @@ fn parse_abbrev_table(bytes: &[u8]) -> Result<AbbrevMap> {
 /// only for variable-length forms (ULEB/SLEB/block/exprloc/string).
 fn form_size(form: u64, addr_size: u8, offset_size: usize, bytes: &[u8]) -> Option<usize> {
     match form {
-        0x01 => Some(addr_size as usize),          // DW_FORM_addr
+        0x01 => Some(addr_size as usize), // DW_FORM_addr
         0x03 => {
             // DW_FORM_block2
-            if bytes.len() < 2 { return None; }
+            if bytes.len() < 2 {
+                return None;
+            }
             let l = u16::from_le_bytes([bytes[0], bytes[1]]) as usize;
             Some(2 + l)
         }
         0x04 => {
             // DW_FORM_block4
-            if bytes.len() < 4 { return None; }
+            if bytes.len() < 4 {
+                return None;
+            }
             let l = u32::from_le_bytes(bytes[0..4].try_into().ok()?) as usize;
             Some(4 + l)
         }
-        0x05 => Some(2),                            // data2
-        0x06 => Some(4),                            // data4
-        0x07 => Some(8),                            // data8
+        0x05 => Some(2), // data2
+        0x06 => Some(4), // data4
+        0x07 => Some(8), // data8
         0x08 => {
             // DW_FORM_string (null-terminated C string)
             bytes.iter().position(|&b| b == 0).map(|i| i + 1)
@@ -602,19 +639,21 @@ fn form_size(form: u64, addr_size: u8, offset_size: usize, bytes: &[u8]) -> Opti
         }
         0x0a => {
             // DW_FORM_block1
-            if bytes.is_empty() { return None; }
+            if bytes.is_empty() {
+                return None;
+            }
             Some(1 + bytes[0] as usize)
         }
-        0x0b => Some(1), // data1
-        0x0c => Some(1), // flag
+        0x0b => Some(1),                             // data1
+        0x0c => Some(1),                             // flag
         0x0d => read_sleb128(bytes).map(|(_, n)| n), // sdata
-        0x0e => Some(offset_size),                  // strp
+        0x0e => Some(offset_size),                   // strp
         0x0f => read_uleb128(bytes).map(|(_, n)| n), // udata
-        0x10 => Some(offset_size),                  // ref_addr
-        0x11 => Some(1),                            // ref1
-        0x12 => Some(2),                            // ref2
-        0x13 => Some(4),                            // ref4
-        0x14 => Some(8),                            // ref8
+        0x10 => Some(offset_size),                   // ref_addr
+        0x11 => Some(1),                             // ref1
+        0x12 => Some(2),                             // ref2
+        0x13 => Some(4),                             // ref4
+        0x14 => Some(8),                             // ref8
         0x15 => read_uleb128(bytes).map(|(_, n)| n), // ref_udata
         0x16 => {
             // DW_FORM_indirect: form is given inline
@@ -622,32 +661,32 @@ fn form_size(form: u64, addr_size: u8, offset_size: usize, bytes: &[u8]) -> Opti
             let inner_size = form_size(inner, addr_size, offset_size, &bytes[n..])?;
             Some(n + inner_size)
         }
-        0x17 => Some(offset_size),                  // sec_offset
+        0x17 => Some(offset_size), // sec_offset
         0x18 => {
             // DW_FORM_exprloc
             let (l, n) = read_uleb128(bytes)?;
             Some(n + l as usize)
         }
-        0x19 => Some(0),                            // flag_present
+        0x19 => Some(0),                             // flag_present
         0x1a => read_uleb128(bytes).map(|(_, n)| n), // strx
         0x1b => read_uleb128(bytes).map(|(_, n)| n), // addrx
-        0x1c => Some(4),                            // ref_sup4
-        0x1d => Some(offset_size),                  // strp_sup
-        0x1e => Some(16),                           // data16
-        0x1f => Some(offset_size),                  // line_strp
-        0x20 => Some(8),                            // ref_sig8
-        0x21 => Some(0),                            // implicit_const
+        0x1c => Some(4),                             // ref_sup4
+        0x1d => Some(offset_size),                   // strp_sup
+        0x1e => Some(16),                            // data16
+        0x1f => Some(offset_size),                   // line_strp
+        0x20 => Some(8),                             // ref_sig8
+        0x21 => Some(0),                             // implicit_const
         0x22 => read_uleb128(bytes).map(|(_, n)| n), // loclistx
         0x23 => read_uleb128(bytes).map(|(_, n)| n), // rnglistx
-        0x24 => Some(8),                            // ref_sup8
-        0x25 => Some(1),                            // strx1
-        0x26 => Some(2),                            // strx2
-        0x27 => Some(3),                            // strx3
-        0x28 => Some(4),                            // strx4
-        0x29 => Some(1),                            // addrx1
-        0x2a => Some(2),                            // addrx2
-        0x2b => Some(3),                            // addrx3
-        0x2c => Some(4),                            // addrx4
+        0x24 => Some(8),                             // ref_sup8
+        0x25 => Some(1),                             // strx1
+        0x26 => Some(2),                             // strx2
+        0x27 => Some(3),                             // strx3
+        0x28 => Some(4),                             // strx4
+        0x29 => Some(1),                             // addrx1
+        0x2a => Some(2),                             // addrx2
+        0x2b => Some(3),                             // addrx3
+        0x2c => Some(4),                             // addrx4
         _ => None,
     }
 }

@@ -108,9 +108,7 @@ impl PeGlobalSymbols {
     }
 
     pub fn in_text(&self, va: u64) -> bool {
-        self.text_range
-            .as_ref()
-            .is_some_and(|r| r.contains(&va))
+        self.text_range.as_ref().is_some_and(|r| r.contains(&va))
     }
 }
 

@@ -10,8 +10,8 @@
 use anyhow::{anyhow, Context, Result};
 use object::write::{Object, Relocation, SectionId, Symbol, SymbolId, SymbolSection};
 use object::{
-    Architecture, BinaryFormat, Endianness, RelocationFlags, SectionKind, SymbolFlags,
-    SymbolKind, SymbolScope,
+    Architecture, BinaryFormat, Endianness, RelocationFlags, SectionKind, SymbolFlags, SymbolKind,
+    SymbolScope,
 };
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -66,11 +66,7 @@ pub struct CuOutcome {
 // ---------------------------------------------------------------------------
 
 /// Emit one COFF `.obj` for `cu`, writing to `out_path`.
-pub fn emit_pe_cu(
-    pe: &PeContext,
-    cu: &PeCompilationUnit,
-    out_path: &Path,
-) -> Result<EmitStats> {
+pub fn emit_pe_cu(pe: &PeContext, cu: &PeCompilationUnit, out_path: &Path) -> Result<EmitStats> {
     let text_section = pe
         .sections
         .iter()
@@ -125,13 +121,8 @@ pub fn emit_pe_cu(
         // branching on PE architecture.
         match pe.arch {
             PeArch::X86_64 => {
-                let recovery = delink_x86_64::recover(
-                    &fn_bytes,
-                    f.va,
-                    f.size as u64,
-                    &pe.symbols,
-                )
-                .with_context(|| format!("recover relocs for '{}' at {:#x}", f.name, f.va))?;
+                let recovery = delink_x86_64::recover(&fn_bytes, f.va, f.size as u64, &pe.symbols)
+                    .with_context(|| format!("recover relocs for '{}' at {:#x}", f.name, f.va))?;
 
                 total_instructions += recovery.diag.instructions;
                 total_unresolved_calls += recovery.diag.calls_unresolved;
@@ -173,7 +164,11 @@ pub fn emit_pe_cu(
 
                 let fn_offset = obj.append_section_data(sid, &fn_bytes, 1);
 
-                let scope = if f.is_public { SymbolScope::Dynamic } else { SymbolScope::Compilation };
+                let scope = if f.is_public {
+                    SymbolScope::Dynamic
+                } else {
+                    SymbolScope::Compilation
+                };
                 let sym_id = obj.add_symbol(Symbol {
                     name: sanitize_symbol_name(&f.name),
                     value: fn_offset,
@@ -191,7 +186,11 @@ pub fn emit_pe_cu(
                     if *var_va == f.va {
                         continue;
                     }
-                    let label_scope = if var.is_public { SymbolScope::Dynamic } else { SymbolScope::Compilation };
+                    let label_scope = if var.is_public {
+                        SymbolScope::Dynamic
+                    } else {
+                        SymbolScope::Compilation
+                    };
                     let label_id = obj.add_symbol(Symbol {
                         name: sanitize_symbol_name(&var.name),
                         value: fn_offset + (var_va - f.va),
@@ -220,15 +219,16 @@ pub fn emit_pe_cu(
                 }
 
                 for r in &recovery.relocs {
-                    let sym_id =
-                        resolve_symbol(&mut obj, &local_syms, &mut undef_cache, &r.target);
+                    let sym_id = resolve_symbol(&mut obj, &local_syms, &mut undef_cache, &r.target);
                     obj.add_relocation(
                         sid,
                         Relocation {
                             offset: fn_offset + r.offset,
                             symbol: sym_id,
                             addend: r.addend - REL32_FIELD_BYTES,
-                            flags: RelocationFlags::Coff { typ: REL_AMD64_REL32 },
+                            flags: RelocationFlags::Coff {
+                                typ: REL_AMD64_REL32,
+                            },
                         },
                     )
                     .with_context(|| format!("add rel32 reloc at {:#x}", r.offset))?;
@@ -237,13 +237,8 @@ pub fn emit_pe_cu(
             }
 
             PeArch::X86 => {
-                let recovery = delink_x86::recover(
-                    &fn_bytes,
-                    f.va,
-                    f.size as u64,
-                    &pe.symbols,
-                )
-                .with_context(|| format!("recover relocs for '{}' at {:#x}", f.name, f.va))?;
+                let recovery = delink_x86::recover(&fn_bytes, f.va, f.size as u64, &pe.symbols)
+                    .with_context(|| format!("recover relocs for '{}' at {:#x}", f.name, f.va))?;
 
                 total_instructions += recovery.diag.instructions;
                 total_unresolved_calls += recovery.diag.calls_unresolved;
@@ -269,9 +264,8 @@ pub fn emit_pe_cu(
                     }
                     let off = (br.va - f.va) as usize;
                     if off + 4 <= fn_bytes.len() {
-                        let stored_va = u32::from_le_bytes(
-                            fn_bytes[off..off + 4].try_into().unwrap(),
-                        ) as u64;
+                        let stored_va =
+                            u32::from_le_bytes(fn_bytes[off..off + 4].try_into().unwrap()) as u64;
                         if let Some((sym_name, addend)) = pe.symbols.resolve_data(stored_va) {
                             let sym = resolve_or_add_undef(&mut obj, &mut undef_cache, &sym_name);
                             fn_bytes[off..off + 4].fill(0);
@@ -282,7 +276,11 @@ pub fn emit_pe_cu(
 
                 let fn_offset = obj.append_section_data(sid, &fn_bytes, 4);
 
-                let scope = if f.is_public { SymbolScope::Dynamic } else { SymbolScope::Compilation };
+                let scope = if f.is_public {
+                    SymbolScope::Dynamic
+                } else {
+                    SymbolScope::Compilation
+                };
                 let sym_id = obj.add_symbol(Symbol {
                     name: sanitize_symbol_name(&f.name),
                     value: fn_offset,
@@ -300,7 +298,11 @@ pub fn emit_pe_cu(
                     if *var_va == f.va {
                         continue;
                     }
-                    let label_scope = if var.is_public { SymbolScope::Dynamic } else { SymbolScope::Compilation };
+                    let label_scope = if var.is_public {
+                        SymbolScope::Dynamic
+                    } else {
+                        SymbolScope::Compilation
+                    };
                     let label_id = obj.add_symbol(Symbol {
                         name: sanitize_symbol_name(&var.name),
                         value: fn_offset + (var_va - f.va),
@@ -329,15 +331,16 @@ pub fn emit_pe_cu(
                 }
 
                 for r in &recovery.relocs {
-                    let sym_id =
-                        resolve_symbol(&mut obj, &local_syms, &mut undef_cache, &r.target);
+                    let sym_id = resolve_symbol(&mut obj, &local_syms, &mut undef_cache, &r.target);
                     obj.add_relocation(
                         sid,
                         Relocation {
                             offset: fn_offset + r.offset,
                             symbol: sym_id,
                             addend: r.addend - REL32_FIELD_BYTES,
-                            flags: RelocationFlags::Coff { typ: REL_I386_REL32 },
+                            flags: RelocationFlags::Coff {
+                                typ: REL_I386_REL32,
+                            },
                         },
                     )
                     .with_context(|| format!("add rel32 reloc at {:#x}", r.offset))?;
@@ -352,7 +355,11 @@ pub fn emit_pe_cu(
         PeArch::X86_64 => (8usize, REL_AMD64_ADDR64),
         PeArch::X86 => (4usize, REL_I386_DIR32),
     };
-    for contrib in cu.contributions.iter().filter(|c| c.section_name != ".text") {
+    for contrib in cu
+        .contributions
+        .iter()
+        .filter(|c| c.section_name != ".text")
+    {
         let Some(pe_section) = pe.sections.iter().find(|s| s.name == contrib.section_name) else {
             continue;
         };
@@ -504,40 +511,35 @@ pub fn emit_pe_shared(pe: &PeContext, out_path: &Path) -> Result<SharedDataStats
     }
     let mut slots: Vec<Slot> = Vec::new();
 
-    let add_section =
-        |obj: &mut Object,
-         slots: &mut Vec<Slot>,
-         stats_bytes: &mut u64,
-         section: &PeSection,
-         kind: SectionKind,
-         start_sym: &str| {
-            let sid = obj.add_section(
-                Vec::new(),
-                section.name.as_bytes().to_vec(),
-                kind,
-            );
-            if kind == SectionKind::UninitializedData {
-                obj.section_mut(sid).append_bss(section.virtual_size, 16);
-            } else {
-                obj.append_section_data(sid, &section.data, 16);
-            }
-            obj.add_symbol(Symbol {
-                name: start_sym.as_bytes().to_vec(),
-                value: 0,
-                size: 0,
-                kind: SymbolKind::Data,
-                scope: SymbolScope::Dynamic,
-                weak: false,
-                section: SymbolSection::Section(sid),
-                flags: SymbolFlags::None,
-            });
-            *stats_bytes += section.virtual_size;
-            slots.push(Slot {
-                sid,
-                va: section.va,
-                size: section.virtual_size,
-            });
-        };
+    let add_section = |obj: &mut Object,
+                       slots: &mut Vec<Slot>,
+                       stats_bytes: &mut u64,
+                       section: &PeSection,
+                       kind: SectionKind,
+                       start_sym: &str| {
+        let sid = obj.add_section(Vec::new(), section.name.as_bytes().to_vec(), kind);
+        if kind == SectionKind::UninitializedData {
+            obj.section_mut(sid).append_bss(section.virtual_size, 16);
+        } else {
+            obj.append_section_data(sid, &section.data, 16);
+        }
+        obj.add_symbol(Symbol {
+            name: start_sym.as_bytes().to_vec(),
+            value: 0,
+            size: 0,
+            kind: SymbolKind::Data,
+            scope: SymbolScope::Dynamic,
+            weak: false,
+            section: SymbolSection::Section(sid),
+            flags: SymbolFlags::None,
+        });
+        *stats_bytes += section.virtual_size;
+        slots.push(Slot {
+            sid,
+            va: section.va,
+            size: section.virtual_size,
+        });
+    };
 
     if let Some(s) = pe.sections.iter().find(|s| s.name == ".rdata") {
         add_section(
@@ -578,8 +580,9 @@ pub fn emit_pe_shared(pe: &PeContext, out_path: &Path) -> Result<SharedDataStats
             _ => continue,
         };
 
-        let Some(slot) =
-            slots.iter().find(|s| br.va >= s.va && br.va + pointer_width as u64 <= s.va + s.size)
+        let Some(slot) = slots
+            .iter()
+            .find(|s| br.va >= s.va && br.va + pointer_width as u64 <= s.va + s.size)
         else {
             continue;
         };
@@ -671,8 +674,7 @@ pub fn emit_pe_shared(pe: &PeContext, out_path: &Path) -> Result<SharedDataStats
 // ---------------------------------------------------------------------------
 
 pub fn split_all_pe(pe: &PeContext, out_dir: &Path) -> Result<Vec<CuOutcome>> {
-    std::fs::create_dir_all(out_dir)
-        .with_context(|| format!("create {}", out_dir.display()))?;
+    std::fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
 
     let outcomes: Vec<CuOutcome> = pe
         .cu_index
@@ -759,6 +761,5 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(path, bytes)
-        .with_context(|| format!("write {}", path.display()))
+    std::fs::write(path, bytes).with_context(|| format!("write {}", path.display()))
 }

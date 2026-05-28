@@ -8,9 +8,9 @@
 use crate::binary::Binary;
 use crate::cu::CuIndex;
 use crate::error::Result;
-use object::read::elf::{ElfFile64, SectionHeader};
 #[allow(unused_imports)]
 use object::read::elf::FileHeader;
+use object::read::elf::{ElfFile64, SectionHeader};
 use object::{Endianness, Object as _, ObjectSection as _};
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
@@ -248,18 +248,17 @@ impl GlobalSymbols {
             .or_else(|| hit(&self.data_range, SYM_DATA_START))
             .or_else(|| hit(&self.bss_range, SYM_BSS_START))
             .or_else(|| {
-                self.elf_section_range(".data.rel.ro")
-                    .and_then(|r| {
-                        if r.contains(&addr) {
-                            Some(DataResolution {
-                                symbol: SYM_DATA_REL_RO_START.to_string(),
-                                addend: (addr - r.start) as i64,
-                                source: DataSource::SectionRelative,
-                            })
-                        } else {
-                            None
-                        }
-                    })
+                self.elf_section_range(".data.rel.ro").and_then(|r| {
+                    if r.contains(&addr) {
+                        Some(DataResolution {
+                            symbol: SYM_DATA_REL_RO_START.to_string(),
+                            addend: (addr - r.start) as i64,
+                            source: DataSource::SectionRelative,
+                        })
+                    } else {
+                        None
+                    }
+                })
             })
     }
 
@@ -271,15 +270,11 @@ impl GlobalSymbols {
     }
 
     pub fn in_got(&self, addr: u64) -> bool {
-        self.got_range
-            .as_ref()
-            .is_some_and(|r| r.contains(&addr))
+        self.got_range.as_ref().is_some_and(|r| r.contains(&addr))
     }
 
     pub fn in_plt(&self, addr: u64) -> bool {
-        self.plt_range
-            .as_ref()
-            .is_some_and(|r| r.contains(&addr))
+        self.plt_range.as_ref().is_some_and(|r| r.contains(&addr))
     }
 
     pub fn classify_section(&self, addr: u64) -> &'static str {
@@ -318,7 +313,8 @@ fn build_plt_map(
         if entry.sym_name.is_empty() {
             continue;
         }
-        let stub_addr = plt_range.start + AARCH64_PLT_HEADER_SIZE + (i as u64) * AARCH64_PLT_ENTRY_SIZE;
+        let stub_addr =
+            plt_range.start + AARCH64_PLT_HEADER_SIZE + (i as u64) * AARCH64_PLT_ENTRY_SIZE;
         map.insert(stub_addr, entry.sym_name.clone());
     }
     Ok(map)
