@@ -102,7 +102,7 @@ fn build_unit<'a>(
     id: usize,
 ) -> Result<Option<CompilationUnit>> {
     let mut entries = unit.entries();
-    let Some((_, root)) = entries.next_dfs()? else {
+    let Some(root) = entries.next_dfs()? else {
         return Ok(None);
     };
     if root.tag() != gimli::DW_TAG_compile_unit {
@@ -112,7 +112,7 @@ fn build_unit<'a>(
     let name = attr_string(dwarf, unit, root, gimli::DW_AT_name)?.unwrap_or_else(|| "<anon>".into());
     let comp_dir = attr_string(dwarf, unit, root, gimli::DW_AT_comp_dir)?;
     let producer = attr_string(dwarf, unit, root, gimli::DW_AT_producer)?;
-    let language = match root.attr_value(gimli::DW_AT_language)? {
+    let language = match root.attr_value(gimli::DW_AT_language) {
         Some(AttributeValue::Language(l)) => Some(l),
         _ => None,
     };
@@ -129,7 +129,7 @@ fn build_unit<'a>(
     let debug_abbrev_range =
         compute_debug_abbrev_range(unit_header.debug_abbrev_offset().0 as usize, abbrev_section);
     let debug_line_range = root
-        .attr_value(gimli::DW_AT_stmt_list)?
+        .attr_value(gimli::DW_AT_stmt_list)
         .and_then(|v| match v {
             AttributeValue::DebugLineRef(off) => Some(off.0 as usize),
             AttributeValue::SecOffset(o) => Some(o as usize),
@@ -141,7 +141,7 @@ fn build_unit<'a>(
     let mut variables = Vec::new();
 
     let mut entries = unit.entries();
-    while let Some((_, entry)) = entries.next_dfs()? {
+    while let Some(entry) = entries.next_dfs()? {
         match entry.tag() {
             gimli::DW_TAG_subprogram => {
                 if let Some(f) = extract_function(dwarf, unit, entry)? {
@@ -176,7 +176,7 @@ fn build_unit<'a>(
 fn compute_debug_info_range<'a>(header: &gimli::UnitHeader<DwarfSlice<'a>>) -> Range<usize> {
     let start = header
         .offset()
-        .as_debug_info_offset()
+        .to_debug_info_offset(header)
         .map(|o| o.0)
         .unwrap_or(0);
     let total = header.length_including_self();
@@ -308,8 +308,8 @@ fn extract_function<'a>(
     entry: &DebuggingInformationEntry<DwarfSlice<'a>>,
 ) -> Result<Option<Function>> {
     // Skip abstract/inlined-only instances; we want concrete definitions.
-    if entry.attr_value(gimli::DW_AT_inline)?.is_some()
-        && entry.attr_value(gimli::DW_AT_low_pc)?.is_none()
+    if entry.attr_value(gimli::DW_AT_inline).is_some()
+        && entry.attr_value(gimli::DW_AT_low_pc).is_none()
     {
         return Ok(None);
     }
@@ -317,7 +317,7 @@ fn extract_function<'a>(
     let Some(addr) = attr_address(dwarf, unit, entry, gimli::DW_AT_low_pc)? else {
         return Ok(None);
     };
-    let size = match entry.attr_value(gimli::DW_AT_high_pc)? {
+    let size = match entry.attr_value(gimli::DW_AT_high_pc) {
         Some(AttributeValue::Addr(end)) => end.saturating_sub(addr),
         Some(AttributeValue::Udata(s)) => s,
         Some(AttributeValue::Data1(s)) => s as u64,
@@ -356,13 +356,13 @@ fn resolve_names_with_refs<'a>(
     let mut linkage = attr_string(dwarf, unit, entry, gimli::DW_AT_linkage_name)?
         .or(attr_string(dwarf, unit, entry, gimli::DW_AT_MIPS_linkage_name)?);
     let mut external = matches!(
-        entry.attr_value(gimli::DW_AT_external)?,
+        entry.attr_value(gimli::DW_AT_external),
         Some(AttributeValue::Flag(true))
     );
 
-    let mut current_offset = match entry.attr_value(gimli::DW_AT_specification)? {
+    let mut current_offset = match entry.attr_value(gimli::DW_AT_specification) {
         Some(AttributeValue::UnitRef(o)) => Some(o),
-        _ => match entry.attr_value(gimli::DW_AT_abstract_origin)? {
+        _ => match entry.attr_value(gimli::DW_AT_abstract_origin) {
             Some(AttributeValue::UnitRef(o)) => Some(o),
             _ => None,
         },
@@ -385,13 +385,13 @@ fn resolve_names_with_refs<'a>(
         }
         if !external {
             external = matches!(
-                referenced.attr_value(gimli::DW_AT_external)?,
+                referenced.attr_value(gimli::DW_AT_external),
                 Some(AttributeValue::Flag(true))
             );
         }
-        current_offset = match referenced.attr_value(gimli::DW_AT_specification)? {
+        current_offset = match referenced.attr_value(gimli::DW_AT_specification) {
             Some(AttributeValue::UnitRef(o)) => Some(o),
-            _ => match referenced.attr_value(gimli::DW_AT_abstract_origin)? {
+            _ => match referenced.attr_value(gimli::DW_AT_abstract_origin) {
                 Some(AttributeValue::UnitRef(o)) => Some(o),
                 _ => None,
             },
@@ -412,7 +412,7 @@ fn extract_variable<'a>(
     let name = attr_string(dwarf, unit, entry, gimli::DW_AT_name)?.unwrap_or_else(|| "<anon>".into());
     let linkage_name = attr_string(dwarf, unit, entry, gimli::DW_AT_linkage_name)?;
     let external = matches!(
-        entry.attr_value(gimli::DW_AT_external)?,
+        entry.attr_value(gimli::DW_AT_external),
         Some(AttributeValue::Flag(true))
     );
     Ok(Some(Variable {
@@ -428,7 +428,7 @@ fn variable_address<'a>(
     unit: &Unit<DwarfSlice<'a>>,
     entry: &DebuggingInformationEntry<DwarfSlice<'a>>,
 ) -> Result<Option<u64>> {
-    let Some(attr) = entry.attr_value(gimli::DW_AT_location)? else {
+    let Some(attr) = entry.attr_value(gimli::DW_AT_location) else {
         return Ok(None);
     };
     let expr = match attr {
@@ -453,7 +453,7 @@ fn attr_string<'a>(
     entry: &DebuggingInformationEntry<DwarfSlice<'a>>,
     name: gimli::DwAt,
 ) -> Result<Option<String>> {
-    let Some(attr) = entry.attr(name)? else {
+    let Some(attr) = entry.attr(name) else {
         return Ok(None);
     };
     let s = dwarf.attr_string(unit, attr.value())?;
@@ -465,7 +465,7 @@ fn attr_u64<'a>(
     entry: &DebuggingInformationEntry<DwarfSlice<'a>>,
     name: gimli::DwAt,
 ) -> Result<Option<u64>> {
-    match entry.attr_value(name)? {
+    match entry.attr_value(name) {
         Some(AttributeValue::Udata(v)) => Ok(Some(v)),
         Some(AttributeValue::Data1(v)) => Ok(Some(v as u64)),
         Some(AttributeValue::Data2(v)) => Ok(Some(v as u64)),
@@ -481,7 +481,7 @@ fn attr_address<'a>(
     entry: &DebuggingInformationEntry<DwarfSlice<'a>>,
     name: gimli::DwAt,
 ) -> Result<Option<u64>> {
-    match entry.attr_value(name)? {
+    match entry.attr_value(name) {
         Some(AttributeValue::Addr(a)) => Ok(Some(a)),
         Some(AttributeValue::DebugAddrIndex(i)) => Ok(Some(dwarf.address(unit, i)?)),
         _ => Ok(None),
