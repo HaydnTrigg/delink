@@ -37,6 +37,11 @@ pub struct PeContrib {
     pub size: u32,
     /// PE section name (e.g. ".text", ".rdata").
     pub section_name: String,
+    /// Section characteristics from the PDB contribution record.
+    /// Reflects the original object-file section flags (before linker merging),
+    /// so IMAGE_SCN_CNT_UNINITIALIZED_DATA is preserved even for contributions
+    /// that the linker merged into the PE's .data section.
+    pub characteristics: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -111,7 +116,7 @@ pub fn build_cu_index(
     }
 
     // --- Collect section contributions per module (0-based module index) ---
-    let mut module_contribs: HashMap<usize, Vec<(u64, u32)>> = HashMap::new();
+    let mut module_contribs: HashMap<usize, Vec<(u64, u32, u32)>> = HashMap::new();
     {
         let mut sc_iter = dbi
             .section_contributions()
@@ -123,7 +128,7 @@ pub fn build_cu_index(
             module_contribs
                 .entry(sc.module as usize)
                 .or_default()
-                .push((rva.0 as u64, sc.size));
+                .push((rva.0 as u64, sc.size, sc.characteristics.0));
         }
     }
 
@@ -214,10 +219,10 @@ pub fn build_cu_index(
             .get(&mod_index)
             .map(|cs| {
                 cs.iter()
-                    .map(|&(rva, size)| {
+                    .map(|&(rva, size, characteristics)| {
                         let va = image_base + rva;
                         let section_name = section_name_for_va(sections, va);
-                        PeContrib { va, size, section_name }
+                        PeContrib { va, size, section_name, characteristics }
                     })
                     .collect()
             })

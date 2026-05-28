@@ -357,20 +357,31 @@ pub fn emit_pe_cu(
             continue;
         };
 
+        // Use the contribution's own characteristics (from the PDB record) rather
+        // than the PE section's flags.  The linker merges .bss into .data, so the
+        // PE .data section always has IMAGE_SCN_CNT_INITIALIZED_DATA, but each
+        // contribution retains its original IMAGE_SCN_CNT_UNINITIALIZED_DATA flag.
         const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
         const IMAGE_SCN_CNT_UNINIT: u32 = 0x0000_0080;
-        let kind = if pe_section.characteristics & IMAGE_SCN_MEM_WRITE != 0
-            && pe_section.characteristics & IMAGE_SCN_CNT_UNINIT != 0
+        let kind = if contrib.characteristics & IMAGE_SCN_MEM_WRITE != 0
+            && contrib.characteristics & IMAGE_SCN_CNT_UNINIT != 0
         {
             SectionKind::UninitializedData
-        } else if pe_section.characteristics & IMAGE_SCN_MEM_WRITE != 0 {
+        } else if contrib.characteristics & IMAGE_SCN_MEM_WRITE != 0 {
             SectionKind::Data
         } else {
             SectionKind::ReadOnlyData
         };
 
-        let data_sid =
-            obj.add_section(Vec::new(), contrib.section_name.as_bytes().to_vec(), kind);
+        // Derive the canonical COFF section name from kind so that BSS
+        // contributions that the linker merged into .data go back to .bss.
+        let coff_name: &[u8] = match kind {
+            SectionKind::UninitializedData => b".bss",
+            SectionKind::Data => b".data",
+            SectionKind::ReadOnlyData => b".rdata",
+            _ => contrib.section_name.as_bytes(),
+        };
+        let data_sid = obj.add_section(Vec::new(), coff_name.to_vec(), kind);
 
         let section_base: u64;
 
