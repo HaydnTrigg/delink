@@ -175,7 +175,7 @@ pub fn emit_pe_cu(
 
                 let scope = if f.is_public { SymbolScope::Dynamic } else { SymbolScope::Compilation };
                 let sym_id = obj.add_symbol(Symbol {
-                    name: f.name.as_bytes().to_vec(),
+                    name: sanitize_symbol_name(&f.name),
                     value: fn_offset,
                     size: f.size as u64,
                     kind: SymbolKind::Text,
@@ -193,7 +193,7 @@ pub fn emit_pe_cu(
                     }
                     let label_scope = if var.is_public { SymbolScope::Dynamic } else { SymbolScope::Compilation };
                     let label_id = obj.add_symbol(Symbol {
-                        name: var.name.as_bytes().to_vec(),
+                        name: sanitize_symbol_name(&var.name),
                         value: fn_offset + (var_va - f.va),
                         size: 0,
                         kind: SymbolKind::Label,
@@ -284,7 +284,7 @@ pub fn emit_pe_cu(
 
                 let scope = if f.is_public { SymbolScope::Dynamic } else { SymbolScope::Compilation };
                 let sym_id = obj.add_symbol(Symbol {
-                    name: f.name.as_bytes().to_vec(),
+                    name: sanitize_symbol_name(&f.name),
                     value: fn_offset,
                     size: f.size as u64,
                     kind: SymbolKind::Text,
@@ -302,7 +302,7 @@ pub fn emit_pe_cu(
                     }
                     let label_scope = if var.is_public { SymbolScope::Dynamic } else { SymbolScope::Compilation };
                     let label_id = obj.add_symbol(Symbol {
-                        name: var.name.as_bytes().to_vec(),
+                        name: sanitize_symbol_name(&var.name),
                         value: fn_offset + (var_va - f.va),
                         size: 0,
                         kind: SymbolKind::Label,
@@ -455,7 +455,7 @@ pub fn emit_pe_cu(
                 SymbolScope::Compilation
             };
             obj.add_symbol(Symbol {
-                name: var.name.as_bytes().to_vec(),
+                name: sanitize_symbol_name(&var.name),
                 value: offset,
                 size: 0,
                 kind: SymbolKind::Data,
@@ -650,7 +650,7 @@ pub fn emit_pe_shared(pe: &PeContext, out_path: &Path) -> Result<SharedDataStats
             SymbolScope::Compilation
         };
         obj.add_symbol(Symbol {
-            name: var.name.as_bytes().to_vec(),
+            name: sanitize_symbol_name(&var.name),
             value: section_offset,
             size: 0,
             kind: SymbolKind::Data,
@@ -720,7 +720,7 @@ fn resolve_or_add_undef(
     }
     // COFF doesn't support SymbolKind::Unknown; use Data for all undefined externs.
     let id = obj.add_symbol(Symbol {
-        name: name.as_bytes().to_vec(),
+        name: sanitize_symbol_name(name),
         value: 0,
         size: 0,
         kind: SymbolKind::Data,
@@ -731,6 +731,14 @@ fn resolve_or_add_undef(
     });
     undef.insert(name.to_string(), id);
     id
+}
+
+fn sanitize_symbol_name(name: &str) -> Vec<u8> {
+    if name.is_empty() {
+        return b"<invalid>".to_vec();
+    }
+
+    name.as_bytes().to_vec()
 }
 
 /// Sanitize a PDB module name (full path) into a filesystem-safe stem.
