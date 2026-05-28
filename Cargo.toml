@@ -24,10 +24,10 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 memmap2 = "0.9"
-object = { version = "0.36", default-features = false, features = ["read", "write", "elf", "pe", "coff", "std"] }
-gimli = { version = "0.31", default-features = false, features = ["read", "std"] }
+object = { version = "0.39.1", default-features = false, features = ["read", "write", "elf", "pe", "coff", "std"] }
+gimli = { version = "0.33.0", default-features = false, features = ["read", "std"] }
 addr2line = { version = "0.24", default-features = false, features = ["std", "loader"] }
-capstone = "0.13"
+capstone = "0.14.0"
 iced-x86 = { version = "1", default-features = false, features = ["decoder", "instr_info", "std"] }
 clap = { version = "4", features = ["derive"] }
 rayon = "1"
