@@ -28,6 +28,13 @@ const REL_AMD64_REL32: u16 = object::pe::IMAGE_REL_AMD64_REL32;
 const REL_I386_DIR32: u16 = object::pe::IMAGE_REL_I386_DIR32;
 const REL_I386_REL32: u16 = object::pe::IMAGE_REL_I386_REL32;
 
+// object::write::coff::coff_adjust_addend (pub(crate), not externally callable) adds the
+// field width to every REL32 addend before embedding it in the section bytes.  It uses the
+// ELF S+A−P convention where P is the *start* of the reloc field, so it needs to add 4 to
+// reach the next-instruction address that the CPU actually branches relative to.
+// We subtract the same amount here so the final embedded value equals r.addend.
+const REL32_FIELD_BYTES: i64 = 4;
+
 #[derive(Debug, Default)]
 pub struct EmitStats {
     pub text_bytes: u64,
@@ -201,7 +208,7 @@ pub fn emit_pe_cu(
                         Relocation {
                             offset: fn_offset + r.offset,
                             symbol: sym_id,
-                            addend: r.addend,
+                            addend: r.addend - REL32_FIELD_BYTES,
                             flags: RelocationFlags::Coff { typ: REL_AMD64_REL32 },
                         },
                     )
@@ -291,7 +298,7 @@ pub fn emit_pe_cu(
                         Relocation {
                             offset: fn_offset + r.offset,
                             symbol: sym_id,
-                            addend: r.addend,
+                            addend: r.addend - REL32_FIELD_BYTES,
                             flags: RelocationFlags::Coff { typ: REL_I386_REL32 },
                         },
                     )
@@ -446,6 +453,31 @@ pub fn emit_pe_shared(pe: &PeContext, out_path: &Path) -> Result<SharedDataStats
             .with_context(|| format!("add shared abs reloc at {:#x}", br.va))?;
             stats.addr64_relocs += 1;
         }
+    }
+
+    // Emit a COFF symbol for each named data variable that falls inside one of
+    // our data sections.  These let other object files (and the linker) resolve
+    // references to global/static variables by name rather than by raw offset.
+    for (va, var) in &pe.symbols.variables {
+        let Some(slot) = slots.iter().find(|s| *va >= s.va && *va < s.va + s.size) else {
+            continue; // variable lives outside our data sections (e.g. in .text)
+        };
+        let section_offset = va - slot.va;
+        let scope = if var.is_public {
+            SymbolScope::Dynamic
+        } else {
+            SymbolScope::Compilation
+        };
+        obj.add_symbol(Symbol {
+            name: var.name.as_bytes().to_vec(),
+            value: section_offset,
+            size: 0,
+            kind: SymbolKind::Data,
+            scope,
+            weak: false,
+            section: SymbolSection::Section(slot.sid),
+            flags: SymbolFlags::None,
+        });
     }
 
     let bytes = obj.write().context("serialize shared COFF object")?;

@@ -11,9 +11,8 @@
 //!
 //! Intra-function branches are skipped. Unresolved targets are counted.
 
-use anyhow::{Context, Result};
-use capstone::arch::x86;
-use capstone::prelude::*;
+use anyhow::Result;
+use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction};
 use tracing::trace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,7 +30,7 @@ pub struct RecoveredReloc {
     pub kind: RelocKind,
     /// Symbol name the reloc targets.
     pub target: String,
-    /// Addend (usually 0 for Rel32).
+    /// Addend relative to the symbol (0 = target is exactly the symbol start).
     pub addend: i64,
 }
 
@@ -70,79 +69,67 @@ pub fn recover<R: SymbolResolver>(
     fn_size: u64,
     resolver: &R,
 ) -> Result<RecoveryOutput> {
-    let cs = Capstone::new()
-        .x86()
-        .mode(x86::ArchMode::Mode32)
-        .detail(false)
-        .build()
-        .context("init capstone x86")?;
-
-    let insns = cs
-        .disasm_all(fn_bytes, fn_va)
-        .context("disassemble x86 function")?;
+    // For 32-bit PE, fn_va fits in 32 bits; pass the low 32 bits as IP.
+    let mut decoder = Decoder::with_ip(32, fn_bytes, fn_va & 0xFFFF_FFFF, DecoderOptions::NONE);
+    let mut insn = Instruction::default();
 
     let mut out = RecoveryOutput {
         relocs: Vec::new(),
         diag: RecoveryDiagnostics::default(),
     };
 
-    for insn in insns.iter() {
+    while decoder.can_decode() {
+        decoder.decode_out(&mut insn);
         out.diag.instructions += 1;
-        let pc = insn.address();
-        let insn_offset = pc - fn_va;
-        let bytes = insn.bytes();
-        let insn_end = pc + bytes.len() as u64;
 
-        if bytes.is_empty() {
+        if insn.is_invalid() {
             out.diag.decode_failures += 1;
             continue;
         }
 
-        let (is_rel32, rel32_field_off, opcode_len) = classify_rel32(bytes);
-        if !is_rel32 {
-            continue;
-        }
-        if bytes.len() < opcode_len + 4 {
-            out.diag.decode_failures += 1;
-            continue;
-        }
+        let pc = insn.ip();
+        let insn_offset = pc - (fn_va & 0xFFFF_FFFF);
+        let insn_len = insn.len() as u64;
 
-        let rel32 = i32::from_le_bytes(
-            bytes[opcode_len..opcode_len + 4].try_into().unwrap(),
-        ) as i64;
-        // 32-bit wrapping add: address space is 32-bit.
-        let target_va = (insn_end as u32).wrapping_add(rel32 as u32) as u64;
+        // Only direct near branches (call rel32 / jmp rel32 / jcc rel32).
+        // rel8 branches are 2 bytes; rel32 are 5 (E8/E9) or 6 (0F 8x) bytes.
+        match insn.flow_control() {
+            FlowControl::Call
+            | FlowControl::UnconditionalBranch
+            | FlowControl::ConditionalBranch => {
+                if insn_len >= 5 {
+                    // near_branch32() gives the absolute 32-bit target VA.
+                    let target_va = insn.near_branch32() as u64;
 
-        if resolver.is_intra_function(fn_va, fn_size, target_va) {
-            continue;
-        }
+                    if !resolver.is_intra_function(fn_va, fn_size, target_va) {
+                        // The rel32 field is always the last 4 bytes of these instructions.
+                        let rel32_off = insn_len - 4;
 
-        match resolver.resolve_code(target_va) {
-            Some((sym, addend)) => {
-                out.relocs.push(RecoveredReloc {
-                    offset: insn_offset + rel32_field_off as u64,
-                    pc,
-                    kind: RelocKind::Rel32,
-                    target: sym,
-                    addend,
-                });
-                out.diag.calls_resolved += 1;
+                        match resolver.resolve_code(target_va) {
+                            Some((sym, addend)) => {
+                                out.relocs.push(RecoveredReloc {
+                                    offset: insn_offset + rel32_off,
+                                    pc,
+                                    kind: RelocKind::Rel32,
+                                    target: sym,
+                                    addend,
+                                });
+                                out.diag.calls_resolved += 1;
+                            }
+                            None => {
+                                trace!(
+                                    "{:#x}: unresolved call/jmp target {:#x}",
+                                    pc, target_va
+                                );
+                                out.diag.calls_unresolved += 1;
+                            }
+                        }
+                    }
+                }
             }
-            None => {
-                trace!("{:#x}: unresolved call/jmp target {:#x}", pc, target_va);
-                out.diag.calls_unresolved += 1;
-            }
+            _ => {}
         }
     }
 
     Ok(out)
-}
-
-/// Returns `(is_rel32, rel32_field_byte_offset, opcode_byte_count)`.
-fn classify_rel32(bytes: &[u8]) -> (bool, usize, usize) {
-    match bytes[0] {
-        0xE8 | 0xE9 => (true, 1, 1),
-        0x0F if bytes.len() >= 2 && (bytes[1] & 0xF0 == 0x80) => (true, 2, 2),
-        _ => (false, 0, 0),
-    }
 }

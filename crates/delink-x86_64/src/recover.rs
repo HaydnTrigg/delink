@@ -9,13 +9,9 @@
 //! Intra-function branches are skipped (no reloc emitted).
 //! Unresolved targets are counted but not reloc'd.
 
-use anyhow::{Context, Result};
-use capstone::arch::x86;
-use capstone::prelude::*;
+use anyhow::Result;
+use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction, OpKind, Register};
 use tracing::trace;
-
-// Capstone x86_64 register ID for RIP (stable in capstone 4.x / capstone-rs 0.13).
-const X86_REG_RIP: u16 = 41;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelocKind {
@@ -34,7 +30,7 @@ pub struct RecoveredReloc {
     pub kind: RelocKind,
     /// Symbol name the reloc targets.
     pub target: String,
-    /// Addend (usually 0 for Rel32; embedded in the bytes for COFF).
+    /// Addend relative to the symbol (0 = target is exactly the symbol start).
     pub addend: i64,
 }
 
@@ -76,132 +72,113 @@ pub fn recover<R: SymbolResolver>(
     fn_size: u64,
     resolver: &R,
 ) -> Result<RecoveryOutput> {
-    let cs = Capstone::new()
-        .x86()
-        .mode(x86::ArchMode::Mode64)
-        .detail(true)
-        .build()
-        .context("init capstone x86_64")?;
-
-    let insns = cs
-        .disasm_all(fn_bytes, fn_va)
-        .context("disassemble x86_64 function")?;
+    let mut decoder = Decoder::with_ip(64, fn_bytes, fn_va, DecoderOptions::NONE);
+    let mut insn = Instruction::default();
 
     let mut out = RecoveryOutput {
         relocs: Vec::new(),
         diag: RecoveryDiagnostics::default(),
     };
 
-    for insn in insns.iter() {
+    while decoder.can_decode() {
+        decoder.decode_out(&mut insn);
         out.diag.instructions += 1;
-        let pc = insn.address();
-        let insn_offset = pc - fn_va; // offset within fn_bytes
-        let bytes = insn.bytes();
-        let insn_end = pc + bytes.len() as u64;
 
-        if bytes.is_empty() {
+        if insn.is_invalid() {
             out.diag.decode_failures += 1;
             continue;
         }
 
-        // --- Direct calls and jumps (rel32) ---
-        // E8 rel32    call
-        // E9 rel32    jmp
-        // 0F 8x rel32 jcc
-        let (is_rel32, rel32_field_off, opcode_len) = classify_rel32(bytes);
-        if is_rel32 {
-            if bytes.len() < opcode_len + 4 {
-                out.diag.decode_failures += 1;
+        let pc = insn.ip();
+        let insn_offset = pc - fn_va;
+        let insn_len = insn.len() as u64;
+
+        // --- Direct near branches with a 32-bit relative operand ---
+        // FlowControl::Call        = CALL rel32
+        // FlowControl::UnconditionalBranch = JMP rel32
+        // FlowControl::ConditionalBranch   = Jcc rel32 or Jcc rel8
+        //
+        // rel8 branches are exactly 2 bytes; rel32 are 5 (E8/E9) or 6 (0F 8x) bytes.
+        // Only rel32 can cross function boundaries and need a relocation.
+        match insn.flow_control() {
+            FlowControl::Call
+            | FlowControl::UnconditionalBranch
+            | FlowControl::ConditionalBranch => {
+                if insn_len >= 5 {
+                    let target_va = insn.near_branch64();
+
+                    if !resolver.is_intra_function(fn_va, fn_size, target_va) {
+                        // The rel32 field is always the last 4 bytes of these instructions.
+                        let rel32_off = insn_len - 4;
+
+                        match resolver.resolve_code(target_va) {
+                            Some((sym, addend)) => {
+                                out.relocs.push(RecoveredReloc {
+                                    offset: insn_offset + rel32_off,
+                                    pc,
+                                    kind: RelocKind::Rel32,
+                                    target: sym,
+                                    addend,
+                                });
+                                out.diag.calls_resolved += 1;
+                            }
+                            None => {
+                                trace!(
+                                    "{:#x}: unresolved call/jmp target {:#x}",
+                                    pc, target_va
+                                );
+                                out.diag.calls_unresolved += 1;
+                            }
+                        }
+                    }
+                }
+                // Skip RIP-relative check for branch instructions.
                 continue;
             }
-            let rel32 = i32::from_le_bytes(
-                bytes[opcode_len..opcode_len + 4].try_into().unwrap(),
-            ) as i64;
-            let target_va = insn_end.wrapping_add(rel32 as u64);
+            _ => {}
+        }
 
-            // Skip intra-function branches (they need no reloc).
-            if resolver.is_intra_function(fn_va, fn_size, target_va) {
+        // --- RIP-relative memory operands [rip + disp32] ---
+        // These appear in all non-branch instruction classes, including
+        // indirect calls/jumps like `call [rip+x]` (IAT thunks).
+        for op_idx in 0..insn.op_count() {
+            if insn.op_kind(op_idx) != OpKind::Memory {
+                continue;
+            }
+            if insn.memory_base() != Register::RIP {
                 continue;
             }
 
-            match resolver.resolve_code(target_va) {
+            // memory_displacement64() is the raw sign-extended disp32 from the
+            // instruction bytes; add next_ip() to obtain the absolute target VA.
+            let target_va = insn.next_ip().wrapping_add(insn.memory_displacement64());
+
+            // The disp32 field is always the last 4 bytes of the instruction.
+            let disp_off = insn_len - 4;
+
+            match resolver.resolve_data(target_va) {
                 Some((sym, addend)) => {
                     out.relocs.push(RecoveredReloc {
-                        offset: insn_offset + rel32_field_off as u64,
+                        offset: insn_offset + disp_off,
                         pc,
                         kind: RelocKind::Rel32,
                         target: sym,
                         addend,
                     });
-                    out.diag.calls_resolved += 1;
+                    out.diag.rip_refs_resolved += 1;
                 }
                 None => {
-                    trace!("{:#x}: unresolved call/jmp target {:#x}", pc, target_va);
-                    out.diag.calls_unresolved += 1;
+                    trace!(
+                        "{:#x}: unresolved RIP-relative ref to {:#x}",
+                        pc, target_va
+                    );
+                    out.diag.rip_refs_unresolved += 1;
                 }
             }
-            continue;
-        }
-
-        // --- RIP-relative memory operands [rip + disp32] ---
-        let detail = match cs.insn_detail(insn) {
-            Ok(d) => d,
-            Err(_) => {
-                out.diag.decode_failures += 1;
-                continue;
-            }
-        };
-        let arch_detail = detail.arch_detail();
-        let Some(x86_detail) = arch_detail.x86() else {
-            out.diag.decode_failures += 1;
-            continue;
-        };
-
-        for op in x86_detail.operands() {
-            if let x86::X86OperandType::Mem(mem) = op.op_type {
-                if mem.base().0 != X86_REG_RIP {
-                    continue;
-                }
-                // RIP-relative: disp32 is always the last 4 bytes of the instruction.
-                if bytes.len() < 4 {
-                    continue;
-                }
-                let disp_field_off = bytes.len() as u64 - 4;
-                let target_va = insn_end.wrapping_add(mem.disp() as u64);
-
-                match resolver.resolve_data(target_va) {
-                    Some((sym, addend)) => {
-                        out.relocs.push(RecoveredReloc {
-                            offset: insn_offset + disp_field_off,
-                            pc,
-                            kind: RelocKind::Rel32,
-                            target: sym,
-                            addend,
-                        });
-                        out.diag.rip_refs_resolved += 1;
-                    }
-                    None => {
-                        trace!(
-                            "{:#x}: unresolved RIP-relative ref to {:#x}",
-                            pc, target_va
-                        );
-                        out.diag.rip_refs_unresolved += 1;
-                    }
-                }
-                // Each instruction has at most one RIP-relative operand.
-                break;
-            }
+            // Each instruction has at most one RIP-relative operand.
+            break;
         }
     }
 
     Ok(out)
-}
-
-/// Returns `(is_rel32, rel32_field_byte_offset, opcode_byte_count)`.
-fn classify_rel32(bytes: &[u8]) -> (bool, usize, usize) {
-    match bytes[0] {
-        0xE8 | 0xE9 => (true, 1, 1), // call/jmp rel32
-        0x0F if bytes.len() >= 2 && (bytes[1] & 0xF0 == 0x80) => (true, 2, 2), // jcc rel32
-        _ => (false, 0, 0),
-    }
 }
