@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "so-delink"
+name = "delink"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,4 +1,4 @@
-//! PE (.exe/.dll) + PDB loader for `so-delink`.
+//! PE (.exe/.dll) + PDB loader for `delink`.
 //!
 //! Supports both 64-bit (PE32+, machine AMD64) and 32-bit (PE32, machine I386)
 //! PE executables together with their PDB files.

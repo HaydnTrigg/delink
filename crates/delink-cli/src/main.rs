@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
-    name = "so-delink",
+    name = "delink",
     version,
     about = "Split a debug .so or .exe into .o/.obj files"
 )]
