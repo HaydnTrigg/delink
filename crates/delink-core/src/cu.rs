@@ -68,7 +68,7 @@ impl CuIndex {
         let mut headers = dwarf.units();
         let mut cu_id = 0usize;
         while let Some(header) = headers.next()? {
-            let unit = dwarf.unit(header.clone())?;
+            let unit = dwarf.unit(header)?;
             if let Some(cu) = build_unit(dwarf, header, &unit, abbrev_section, line_section, cu_id)?
             {
                 units.push(cu);
@@ -122,12 +122,12 @@ fn build_unit<'a>(
 
     let debug_info_range = compute_debug_info_range(&unit_header);
     let debug_abbrev_range =
-        compute_debug_abbrev_range(unit_header.debug_abbrev_offset().0 as usize, abbrev_section);
+        compute_debug_abbrev_range(unit_header.debug_abbrev_offset().0, abbrev_section);
     let debug_line_range = root
         .attr_value(gimli::DW_AT_stmt_list)
         .and_then(|v| match v {
-            AttributeValue::DebugLineRef(off) => Some(off.0 as usize),
-            AttributeValue::SecOffset(o) => Some(o as usize),
+            AttributeValue::DebugLineRef(off) => Some(off.0),
+            AttributeValue::SecOffset(o) => Some(o),
             _ => None,
         })
         .and_then(|off| compute_debug_line_range(off, line_section));
@@ -460,20 +460,6 @@ fn attr_string<'a>(
     let s = dwarf.attr_string(unit, attr.value())?;
     let owned = s.to_string_lossy().into_owned();
     Ok(Some(owned))
-}
-
-fn attr_u64<'a>(
-    entry: &DebuggingInformationEntry<DwarfSlice<'a>>,
-    name: gimli::DwAt,
-) -> Result<Option<u64>> {
-    match entry.attr_value(name) {
-        Some(AttributeValue::Udata(v)) => Ok(Some(v)),
-        Some(AttributeValue::Data1(v)) => Ok(Some(v as u64)),
-        Some(AttributeValue::Data2(v)) => Ok(Some(v as u64)),
-        Some(AttributeValue::Data4(v)) => Ok(Some(v as u64)),
-        Some(AttributeValue::Data8(v)) => Ok(Some(v)),
-        _ => Ok(None),
-    }
 }
 
 fn attr_address<'a>(

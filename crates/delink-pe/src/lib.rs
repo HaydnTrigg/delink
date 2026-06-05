@@ -372,11 +372,8 @@ fn try_parse_imports(
 
     let mut map = HashMap::new();
     let mut desc_rva = import_rva as u64;
-    loop {
-        // IMAGE_IMPORT_DESCRIPTOR is 20 bytes.
-        let Some(desc) = rva_slice(sections, desc_rva, 20) else {
-            break;
-        };
+    // IMAGE_IMPORT_DESCRIPTOR is 20 bytes.
+    while let Some(desc) = rva_slice(sections, desc_rva, 20) {
         let original_first_thunk = u32::from_le_bytes(desc[0..4].try_into().unwrap()) as u64;
         let name_rva = u32::from_le_bytes(desc[12..16].try_into().unwrap()) as u64;
         let first_thunk = u32::from_le_bytes(desc[16..20].try_into().unwrap()) as u64;
@@ -392,15 +389,11 @@ fn try_parse_imports(
         };
 
         let mut entry_idx = 0u64;
-        loop {
-            let Some(thunk_bytes) = rva_slice(
-                sections,
-                hint_rva + entry_idx * thunk_width,
-                thunk_width as usize,
-            ) else {
-                break;
-            };
-
+        while let Some(thunk_bytes) = rva_slice(
+            sections,
+            hint_rva + entry_idx * thunk_width,
+            thunk_width as usize,
+        ) {
             // Read thunk as a native-width integer, zero-extended to u64.
             let thunk: u64 = match arch {
                 PeArch::X86_64 => u64::from_le_bytes(thunk_bytes.try_into().unwrap()),
@@ -443,7 +436,7 @@ fn try_parse_imports(
 // RVA helpers
 // ---------------------------------------------------------------------------
 
-pub(crate) fn rva_slice<'a>(sections: &'a [PeSection], rva: u64, len: usize) -> Option<&'a [u8]> {
+pub(crate) fn rva_slice(sections: &[PeSection], rva: u64, len: usize) -> Option<&[u8]> {
     for s in sections {
         if rva >= s.rva && rva + len as u64 <= s.rva + s.virtual_size {
             let off = (rva - s.rva) as usize;

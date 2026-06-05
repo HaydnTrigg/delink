@@ -42,6 +42,12 @@ delink-x86_64 = { path = "crates/delink-x86_64" }
 delink-x86 = { path = "crates/delink-x86" }
 delink-pe = { path = "crates/delink-pe" }
 
-[profile.release]
-lto = "thin"
+[profile.release-lto]
+inherits = "release"
+lto = "fat"
+strip = "debuginfo"
 codegen-units = 1
+
+[profile.release-min]
+inherits = "release-lto"
+opt-level = "z"

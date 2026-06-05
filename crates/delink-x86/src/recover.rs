@@ -96,30 +96,30 @@ pub fn recover<R: SymbolResolver>(
         match insn.flow_control() {
             FlowControl::Call
             | FlowControl::UnconditionalBranch
-            | FlowControl::ConditionalBranch => {
-                if insn_len >= 5 {
-                    // near_branch32() gives the absolute 32-bit target VA.
-                    let target_va = insn.near_branch32() as u64;
+            | FlowControl::ConditionalBranch
+                if insn_len >= 5 =>
+            {
+                // near_branch32() gives the absolute 32-bit target VA.
+                let target_va = insn.near_branch32() as u64;
 
-                    if !resolver.is_intra_function(fn_va, fn_size, target_va) {
-                        // The rel32 field is always the last 4 bytes of these instructions.
-                        let rel32_off = insn_len - 4;
+                if !resolver.is_intra_function(fn_va, fn_size, target_va) {
+                    // The rel32 field is always the last 4 bytes of these instructions.
+                    let rel32_off = insn_len - 4;
 
-                        match resolver.resolve_code(target_va) {
-                            Some((sym, addend)) => {
-                                out.relocs.push(RecoveredReloc {
-                                    offset: insn_offset + rel32_off,
-                                    pc,
-                                    kind: RelocKind::Rel32,
-                                    target: sym,
-                                    addend,
-                                });
-                                out.diag.calls_resolved += 1;
-                            }
-                            None => {
-                                trace!("{:#x}: unresolved call/jmp target {:#x}", pc, target_va);
-                                out.diag.calls_unresolved += 1;
-                            }
+                    match resolver.resolve_code(target_va) {
+                        Some((sym, addend)) => {
+                            out.relocs.push(RecoveredReloc {
+                                offset: insn_offset + rel32_off,
+                                pc,
+                                kind: RelocKind::Rel32,
+                                target: sym,
+                                addend,
+                            });
+                            out.diag.calls_resolved += 1;
+                        }
+                        None => {
+                            trace!("{:#x}: unresolved call/jmp target {:#x}", pc, target_va);
+                            out.diag.calls_unresolved += 1;
                         }
                     }
                 }

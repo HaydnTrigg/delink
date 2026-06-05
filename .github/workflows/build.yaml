@@ -1,0 +1,221 @@
+name: Build
+
+on:
+  pull_request:
+  push:
+    paths-ignore:
+      - "*.md"
+      - "LICENSE*"
+  workflow_dispatch:
+
+permissions:
+  # For npm publish provenance
+  id-token: write
+
+env:
+  BUILD_PROFILE: release-lto
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install libgtk-3-dev
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache Rust workspace
+        uses: Swatinem/rust-cache@v2
+      - name: Cargo check
+        run: cargo check --all-targets --all-features --workspace
+      - name: Cargo clippy
+        run: cargo clippy --all-targets --all-features --workspace
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Rust toolchain
+        # We use nightly options in rustfmt.toml
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: Cargo fmt
+        run: cargo fmt --all --check
+
+  deny:
+    name: Deny
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        checks:
+          # - advisories
+          - bans licenses sources
+    # Prevent new advisories from failing CI
+    continue-on-error: ${{ matrix.checks == 'advisories' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check ${{ matrix.checks }}
+
+  test:
+    name: Test
+    strategy:
+      matrix:
+        platform: [ ubuntu-latest, windows-latest, macos-latest ]
+      fail-fast: false
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Install dependencies
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install libgtk-3-dev
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust workspace
+        uses: Swatinem/rust-cache@v2
+      - name: Cargo test
+        run: cargo test --release --all-features --workspace
+
+  build:
+    name: Build delink
+    env:
+      CARGO_BIN_NAME: delink
+    strategy:
+      matrix:
+        include:
+          - platform: ubuntu-latest
+            target: x86_64-unknown-linux-gnu.2.31
+            target_base: x86_64-unknown-linux-gnu
+            name: linux-x86_64
+            packages: libgtk-3-dev
+            build: zigbuild
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x86_64
+            build: build
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            name: macos-x86_64
+            build: build
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            name: macos-arm64
+            build: build
+      fail-fast: false
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Install dependencies
+        if: matrix.packages != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install ${{ matrix.packages }}
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Install uv
+        if: matrix.build == 'zigbuild'
+        uses: astral-sh/setup-uv@v7
+      - name: Install cargo-zigbuild
+        if: matrix.build == 'zigbuild'
+        run: |
+          uv tool install cargo-zigbuild==0.20.1 --with-executables-from ziglang==0.15.1
+          echo "CARGO_ZIGBUILD_ZIG_PATH=$(uv tool dir)/cargo-zigbuild/bin/python-zig" >> $GITHUB_ENV
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target_base || matrix.target }}
+      - name: Cache Rust workspace
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Cargo build
+        run: >
+          cargo ${{ matrix.build }} --profile ${{ env.BUILD_PROFILE }} --target ${{ matrix.target }} --bin ${{ env.CARGO_BIN_NAME }}
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.CARGO_BIN_NAME }}-${{ matrix.name }}
+          path: |
+            target/${{ matrix.target_base || matrix.target }}/${{ env.BUILD_PROFILE }}/${{ env.CARGO_BIN_NAME }}
+            target/${{ matrix.target_base || matrix.target }}/${{ env.BUILD_PROFILE }}/${{ env.CARGO_BIN_NAME }}.exe
+          if-no-files-found: error
+
+  check-version:
+    name: Check package versions
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    needs: [ build ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Check git tag against package versions
+        shell: bash
+        run: |
+          set -eou pipefail
+          tag='${{github.ref}}'
+          tag="${tag#refs/tags/}"
+          version=$(grep '^version' Cargo.toml | head -1 | awk -F' = ' '{print $2}' | tr -d '"')
+          version="v$version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::Git tag doesn't match the Cargo version! ($tag != $version)"
+            exit 1
+          fi
+
+  release-github:
+    name: Release (GitHub)
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    needs: [ check-version ]
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: delink-*
+          path: artifacts
+      - name: Rename artifacts
+        working-directory: artifacts
+        run: |
+          set -euo pipefail
+          mkdir ../out
+          for dir in */; do
+            for file in "$dir"*; do
+              base=$(basename "$file")
+              name="${base%.*}"
+              ext="${base##*.}"
+              if [ "$ext" = "$base" ]; then
+                  ext=""
+              else
+                  ext=".$ext"
+              fi
+              arch="${dir%/}" # remove trailing slash
+              arch="${arch##"$name-"}" # remove bin name
+              dst="../out/${name}-${arch}${ext}"
+              mv "$file" "$dst"
+            done
+          done
+          ls -R ../out
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          draft: true
+          generate_release_notes: true

@@ -113,7 +113,6 @@ pub fn scan_debug_info(
             let size = match size {
                 Some(s) => s,
                 None => {
-                    diag.unknown_forms += 1;
                     // If we don't know how to advance, we have to bail —
                     // continuing would desync the parse.
                     return Err(anyhow!(
@@ -127,24 +126,22 @@ pub fn scan_debug_info(
                 // DW_FORM_addr
                 0x01 => {
                     let addr = read_addr(&slice[cursor..], addr_size);
-                    if attr.attr == 0x11 /* DW_AT_low_pc */
+                    if (attr.attr == 0x11 /* DW_AT_low_pc */
                         || attr.attr == 0x12 /* DW_AT_high_pc (as addr: end) */
-                        || attr.attr == 0x52
-                    /* DW_AT_entry_pc */
+                        || attr.attr == 0x52/* DW_AT_entry_pc */)
+                        && addr != 0
                     {
-                        if addr != 0 {
-                            match resolve_addr(symbols, addr) {
-                                Some((name, addend)) => {
-                                    relocs.push(DwarfReloc::Abs64 {
-                                        offset: attr_off as u64,
-                                        symbol: name,
-                                        addend,
-                                    });
-                                    diag.low_pc_resolved += 1;
-                                }
-                                None => {
-                                    diag.low_pc_missing += 1;
-                                }
+                        match resolve_addr(symbols, addr) {
+                            Some((name, addend)) => {
+                                relocs.push(DwarfReloc::Abs64 {
+                                    offset: attr_off as u64,
+                                    symbol: name,
+                                    addend,
+                                });
+                                diag.low_pc_resolved += 1;
+                            }
+                            None => {
+                                diag.low_pc_missing += 1;
                             }
                         }
                     }

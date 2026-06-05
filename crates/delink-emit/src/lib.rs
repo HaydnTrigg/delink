@@ -729,7 +729,7 @@ pub fn emit_shared_data(
         let translated = match classify_dyn_reloc(rel) {
             DynClass::Relative => {
                 let target_addr = rel.r_addend as u64;
-                resolve_target_name(symbols, target_addr).map(|(name, addend)| (name, addend))
+                resolve_target_name(symbols, target_addr)
             }
             DynClass::Abs64 => Some((rel.sym_name.clone(), rel.r_addend)),
             DynClass::GlobDat => Some((rel.sym_name.clone(), rel.r_addend)),
@@ -962,10 +962,7 @@ fn add_start_symbol(obj: &mut Object, section_id: SectionId, name: &str) {
 /// on Windows-compiled inputs) into a filesystem-safe stem.
 pub fn sanitize_cu_name(name: &str) -> String {
     // Take only the final path component, strip any extension.
-    let basename = name
-        .rsplit(|c| c == '/' || c == '\\')
-        .next()
-        .unwrap_or(name);
+    let basename = name.rsplit(['/', '\\']).next().unwrap_or(name);
     let stem = match basename.rfind('.') {
         Some(i) => &basename[..i],
         None => basename,

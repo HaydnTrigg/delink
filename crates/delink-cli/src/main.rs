@@ -364,7 +364,6 @@ fn aarch64_reloc_name(t: u32) -> String {
 fn open_binary<'a>(mmap: &'a memmap2::Mmap, path: &Path) -> Result<delink_core::Binary<'a>> {
     delink_core::Binary::load(&mmap[..])
         .with_context(|| format!("failed to load {}", path.display()))
-        .map_err(Into::into)
 }
 
 fn mmap_file(path: &Path) -> Result<memmap2::Mmap> {
@@ -451,7 +450,7 @@ fn cmd_list_cus(path: &Path, contains: &str, limit: usize) -> Result<()> {
         })
         .collect();
     rows.sort_by_key(|(b, _, _)| *b);
-    println!("{:>10} {:>6}  {}", "bytes", "funcs", "name");
+    println!("{:>10} {:>6}  name", "bytes", "funcs");
     for (bytes, funcs, name) in rows.iter().take(limit) {
         println!("{:>10} {:>6}  {}", bytes, funcs, name);
     }
@@ -521,7 +520,7 @@ fn cmd_pe_list_cus(exe_path: &Path, pdb_path: &Path, contains: &str, limit: usiz
         .collect();
     rows.sort_by_key(|(b, _, _)| *b);
 
-    println!("{:>10} {:>6}  {}", "text bytes", "funcs", "name");
+    println!("{:>10} {:>6}  name", "text bytes", "funcs");
     for (bytes, funcs, name) in rows.iter().take(limit) {
         println!("{:>10} {:>6}  {}", bytes, funcs, name);
     }

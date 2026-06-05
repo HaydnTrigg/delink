@@ -76,6 +76,12 @@ pub struct PeCuIndex {
     pub units: Vec<PeCompilationUnit>,
 }
 
+type CuIndexResult = (
+    PeCuIndex,
+    BTreeMap<u64, PeFunction>,
+    BTreeMap<u64, PeVariable>,
+);
+
 /// Parse a PDB and return `(CuIndex, all_functions_by_VA, all_variables_by_VA)`.
 ///
 /// `image_base` is from the PE optional header; `sections` are the PE
@@ -84,11 +90,7 @@ pub fn build_cu_index(
     pdb_data: &[u8],
     image_base: u64,
     sections: &[PeSection],
-) -> Result<(
-    PeCuIndex,
-    BTreeMap<u64, PeFunction>,
-    BTreeMap<u64, PeVariable>,
-)> {
+) -> Result<CuIndexResult> {
     let cursor = std::io::Cursor::new(pdb_data);
     let mut pdb = pdb::PDB::open(cursor).context("open PDB")?;
 
@@ -129,10 +131,11 @@ pub fn build_cu_index(
             let Some(rva) = sc.offset.to_rva(&address_map) else {
                 continue;
             };
-            module_contribs
-                .entry(sc.module as usize)
-                .or_default()
-                .push((rva.0 as u64, sc.size, sc.characteristics.0));
+            module_contribs.entry(sc.module).or_default().push((
+                rva.0 as u64,
+                sc.size,
+                sc.characteristics.0,
+            ));
         }
     }
 

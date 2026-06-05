@@ -403,11 +403,10 @@ pub fn emit_pe_cu(pe: &PeContext, cu: &PeCompilationUnit, out_path: &Path) -> Re
             // Zero base-reloc slots and stage their relocations.
             let mut staged_data: Vec<(u64, SymbolId, i64, u16)> = Vec::new();
             for br in &pe.base_relocations {
-                let matches = match (&pe.arch, &br.kind) {
-                    (PeArch::X86_64, BaseRelocKind::Dir64) => true,
-                    (PeArch::X86, BaseRelocKind::HighLow) => true,
-                    _ => false,
-                };
+                let matches = matches!(
+                    (&pe.arch, &br.kind),
+                    (PeArch::X86_64, BaseRelocKind::Dir64) | (PeArch::X86, BaseRelocKind::HighLow)
+                );
                 if !matches {
                     continue;
                 }
@@ -746,10 +745,7 @@ fn sanitize_symbol_name(name: &str) -> Vec<u8> {
 /// Sanitize a PDB module name (full path) into a filesystem-safe stem.
 fn sanitize_file_stem(name: &str) -> String {
     // Take only the final path component, strip any extension.
-    let basename = name
-        .rsplit(|c| c == '/' || c == '\\')
-        .next()
-        .unwrap_or(name);
+    let basename = name.rsplit(['/', '\\']).next().unwrap_or(name);
     let stem = match basename.rfind('.') {
         Some(i) => &basename[..i],
         None => basename,

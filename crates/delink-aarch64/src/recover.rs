@@ -6,7 +6,7 @@
 //!   * `adrp` + `add` pair           → ADR_PREL_PG_HI21 + ADD_ABS_LO12_NC
 //!   * `adrp` + `ldr/ldst` pair      → ADR_PREL_PG_HI21 + LDST{n}_ABS_LO12_NC
 //!   * `adrp` + `ldr` where target lands in `.got`
-//!                                    → ADR_GOT_PAGE + LD64_GOT_LO12_NC
+//!     → ADR_GOT_PAGE + LD64_GOT_LO12_NC
 //!
 //! Pairing is a per-function register-tracking pass. State is reset at every
 //! function boundary (best effort: any unconditional branch, return, or call).
@@ -359,11 +359,8 @@ fn write_regs(mnemonic: &str, ops: &[arm64::Arm64Operand]) -> Vec<u32> {
         || mnemonic == "stur"
         || mnemonic == "sturb"
         || mnemonic == "sturh"
-    {
-        0
-    } else if matches!(mnemonic, "cmp" | "cmn" | "tst" | "ccmp" | "ccmn") {
-        0
-    } else if mnemonic.starts_with('b')
+        || matches!(mnemonic, "cmp" | "cmn" | "tst" | "ccmp" | "ccmn")
+        || mnemonic.starts_with('b')
         || matches!(mnemonic, "ret" | "cbz" | "cbnz" | "tbz" | "tbnz")
     {
         0

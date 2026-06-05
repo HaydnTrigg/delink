@@ -98,15 +98,10 @@ fn count_dyn_relocs(binary: &Binary<'_>) -> Vec<(String, usize)> {
         if entsize == 0 {
             continue;
         }
-        let is_rela = sh.sh_type(endian) == object::elf::SHT_RELA;
         let entry_count = data.len() as u64 / entsize;
         for i in 0..entry_count {
             let off = (i * entsize) as usize;
-            let r_info = if is_rela {
-                read_u64(&data[off + 8..off + 16])
-            } else {
-                read_u64(&data[off + 8..off + 16])
-            };
+            let r_info = read_u64(&data[off + 8..off + 16]);
             let r_type = (r_info & 0xffff_ffff) as u32;
             *counts.entry(r_type).or_default() += 1;
         }
@@ -165,12 +160,7 @@ pub fn format_text(r: &InspectReport) -> String {
     writeln!(out).unwrap();
 
     writeln!(out, "SECTIONS").unwrap();
-    writeln!(
-        out,
-        "  {:<28} {:>16} {:>10}  {}",
-        "name", "addr", "size", "kind"
-    )
-    .unwrap();
+    writeln!(out, "  {:<28} {:>16} {:>10}  kind", "name", "addr", "size").unwrap();
     for s in &r.sections {
         writeln!(
             out,
