@@ -148,7 +148,7 @@ pub fn recover<R: SymbolResolver>(
 
             // memory_displacement64() is the raw sign-extended disp32 from the
             // instruction bytes; add next_ip() to obtain the absolute target VA.
-            let target_va = insn.next_ip().wrapping_add(insn.memory_displacement64());
+            let target_va = insn.memory_displacement64();
 
             // The disp32 field is always the last 4 bytes of the instruction.
             let disp_off = insn_len - 4;
