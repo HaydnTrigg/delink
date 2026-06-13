@@ -139,6 +139,14 @@ enum Cmd {
         /// written to `<outdir>/symtab.json`.
         #[arg(long)]
         symtab: Option<PathBuf>,
+        /// Emit standard ELF ET_REL objects instead of Mach-O objects.
+        ///
+        /// Useful when targeting a Linux/ELF toolchain with a Mach-O input.
+        /// i386 input: PC-relative calls become `R_386_PC32` relocations.
+        /// `__DATA,__data` → `.data`, `__DATA,__const` → `.rodata`,
+        /// `__DATA,__bss` → `.bss`.
+        #[arg(long)]
+        emit_elf: bool,
     },
 }
 
@@ -194,7 +202,8 @@ fn main() -> Result<()> {
             input,
             outdir,
             symtab,
-        } => cmd_macho_split(&input, &outdir, symtab.as_deref()),
+            emit_elf,
+        } => cmd_macho_split(&input, &outdir, symtab.as_deref(), emit_elf),
     }
 }
 
@@ -627,7 +636,7 @@ fn cmd_macho_list_cus(path: &Path, contains: &str, limit: usize) -> Result<()> {
     Ok(())
 }
 
-fn cmd_macho_split(path: &Path, outdir: &Path, symtab_arg: Option<&Path>) -> Result<()> {
+fn cmd_macho_split(path: &Path, outdir: &Path, symtab_arg: Option<&Path>, emit_as_elf: bool) -> Result<()> {
     let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     tracing::info!("loaded Mach-O ({} bytes)", data.len());
 
@@ -671,11 +680,15 @@ fn cmd_macho_split(path: &Path, outdir: &Path, symtab_arg: Option<&Path>) -> Res
     // ------------------------------------------------------------------
     // Split using symtab grouping
     // ------------------------------------------------------------------
-    let outcomes = delink_macho::emit::split_by_symtab(&ctx, &symtab, &lookup, outdir)?;
+    let outcomes = delink_macho::emit::split_by_symtab(&ctx, &symtab, &lookup, outdir, emit_as_elf)?;
 
     let shared = outdir.join("__shared_data.o");
     tracing::info!("emitting shared data → {}", shared.display());
-    let shared_stats = delink_macho::emit::emit_macho_shared(&ctx, &shared)?;
+    let shared_stats = if emit_as_elf {
+        delink_macho::emit::emit_elf_shared(&ctx, &shared)?
+    } else {
+        delink_macho::emit::emit_macho_shared(&ctx, &shared)?
+    };
 
     // ------------------------------------------------------------------
     // Build manifest.json

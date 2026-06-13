@@ -25,6 +25,16 @@ const GENERIC_RELOC_VANILLA: u8 = object::macho::GENERIC_RELOC_VANILLA;
 // r_length = 2 → 4-byte field (2^2 = 4).
 const R_LENGTH_4: u8 = 2;
 
+// ELF addend adjustment: R_386_PC32 uses S+A−P where P is the field start, so
+// we subtract 4 (the field width) to account for x86's next-instruction-relative
+// branch target convention (same adjustment as the COFF emitter).
+const REL32_FIELD_BYTES: i64 = 4;
+
+// Symbol names used in the ELF shared-data object (match delink-core conventions).
+const ELF_SYM_DATA_START: &[u8] = b"__delink_data_start";
+const ELF_SYM_RODATA_START: &[u8] = b"__delink_rodata_start";
+const ELF_SYM_BSS_START: &[u8] = b"__delink_bss_start";
+
 #[derive(Debug, Default)]
 pub struct EmitStats {
     pub text_bytes: u64,
@@ -195,6 +205,144 @@ pub fn emit_macho_cu(
 }
 
 // ---------------------------------------------------------------------------
+// Per-CU emit — ELF output
+// ---------------------------------------------------------------------------
+
+/// Like [`emit_macho_cu`] but writes a standard ET_REL ELF object.
+///
+/// Sections use ELF naming (`.text`).  For i386 input the synthesised
+/// PC-relative relocations are emitted as `R_386_PC32`.  Other
+/// architectures produce raw bytes without synthetic relocations (same
+/// limitation as the Mach-O path).
+pub fn emit_elf_cu(
+    ctx: &MachoContext,
+    cu: &MachoCompilationUnit,
+    out_path: &Path,
+) -> Result<EmitStats> {
+    let text_section = ctx
+        .text_section()
+        .ok_or_else(|| anyhow!("binary has no __TEXT,__text section"))?;
+
+    let mut live: Vec<&MachoFunction> = cu
+        .functions
+        .iter()
+        .filter(|f| f.size > 0 && text_section.contains_addr(f.addr))
+        .collect();
+
+    if live.is_empty() {
+        return Err(anyhow!("CU '{}' has no functions inside __text", cu.name));
+    }
+    live.sort_by_key(|f| f.addr);
+
+    let (elf_arch, endianness) = arch_to_object(ctx.arch);
+    let mut obj = Object::new(BinaryFormat::Elf, elf_arch, endianness);
+    let mut local_syms: HashMap<String, SymbolId> = HashMap::new();
+    let mut undef_cache: HashMap<String, SymbolId> = HashMap::new();
+
+    let text_sid = obj.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
+
+    let mut stats = EmitStats::default();
+    let recover_x86 = ctx.arch == MachoArch::X86;
+
+    for f in &live {
+        let fn_start = (f.addr - text_section.addr) as usize;
+        let fn_end = fn_start + f.size as usize;
+        if fn_end > text_section.data.len() {
+            tracing::warn!(
+                "function '{}' at {:#x} extends past __text; skipping",
+                f.name,
+                f.addr
+            );
+            continue;
+        }
+        let mut fn_bytes = text_section.data[fn_start..fn_end].to_vec();
+        stats.text_bytes += f.size;
+
+        let relocs_to_emit: Vec<delink_x86::recover::RecoveredReloc> = if recover_x86 {
+            let recovery = delink_x86::recover(&fn_bytes, f.addr, f.size, &ctx.symbols)
+                .with_context(|| format!("recover relocs for '{}' at {:#x}", f.name, f.addr))?;
+            stats.instructions += recovery.diag.instructions;
+            stats.unresolved_calls += recovery.diag.calls_unresolved;
+            for r in &recovery.relocs {
+                let off = r.offset as usize;
+                if off + 4 <= fn_bytes.len() {
+                    fn_bytes[off..off + 4].fill(0);
+                }
+            }
+            recovery.relocs
+        } else {
+            vec![]
+        };
+
+        let fn_offset = obj.append_section_data(text_sid, &fn_bytes, 4);
+
+        let scope = if f.external {
+            SymbolScope::Dynamic
+        } else {
+            SymbolScope::Compilation
+        };
+        let sym_name = sanitize_symbol_name(f.symbol_name());
+        let sym_id = obj.add_symbol(Symbol {
+            name: sym_name.clone(),
+            value: fn_offset,
+            size: f.size,
+            kind: SymbolKind::Text,
+            scope,
+            weak: false,
+            section: SymbolSection::Section(text_sid),
+            flags: SymbolFlags::None,
+        });
+        local_syms.insert(f.symbol_name().to_string(), sym_id);
+
+        for (var_va, var) in ctx.symbols.variables.range(f.addr..f.addr + f.size) {
+            if *var_va == f.addr {
+                continue;
+            }
+            let label_scope = if var.external {
+                SymbolScope::Dynamic
+            } else {
+                SymbolScope::Compilation
+            };
+            let label_id = obj.add_symbol(Symbol {
+                name: sanitize_symbol_name(var.symbol_name()),
+                value: fn_offset + (var_va - f.addr),
+                size: 0,
+                kind: SymbolKind::Label,
+                scope: label_scope,
+                weak: false,
+                section: SymbolSection::Section(text_sid),
+                flags: SymbolFlags::None,
+            });
+            local_syms.insert(var.symbol_name().to_string(), label_id);
+        }
+
+        for r in &relocs_to_emit {
+            let sym_id = resolve_symbol(&mut obj, &local_syms, &mut undef_cache, &r.target);
+            obj.add_relocation(
+                text_sid,
+                Relocation {
+                    offset: fn_offset + r.offset,
+                    symbol: sym_id,
+                    addend: r.addend - REL32_FIELD_BYTES,
+                    flags: RelocationFlags::Elf {
+                        r_type: object::elf::R_386_PC32,
+                    },
+                },
+            )
+            .with_context(|| format!("add reloc at {:#x} → '{}'", f.addr + r.offset, r.target))?;
+            stats.relocations += 1;
+        }
+    }
+
+    stats.local_symbols = local_syms.len();
+    stats.undef_symbols = undef_cache.len();
+
+    let bytes = obj.write().context("serialize ELF object")?;
+    write_file(out_path, &bytes)?;
+    Ok(stats)
+}
+
+// ---------------------------------------------------------------------------
 // Shared data emit
 // ---------------------------------------------------------------------------
 
@@ -308,6 +456,119 @@ pub fn emit_macho_shared(ctx: &MachoContext, out_path: &Path) -> Result<SharedDa
 }
 
 // ---------------------------------------------------------------------------
+// Shared data emit — ELF output
+// ---------------------------------------------------------------------------
+
+/// Like [`emit_macho_shared`] but writes standard ET_REL ELF sections.
+///
+/// Section mapping:
+/// - `__DATA,__data`  → `.data`   with `__delink_data_start`
+/// - `__DATA,__const` → `.rodata` with `__delink_rodata_start`
+/// - `__DATA,__bss`   → `.bss`    with `__delink_bss_start`
+pub fn emit_elf_shared(ctx: &MachoContext, out_path: &Path) -> Result<SharedDataStats> {
+    let (elf_arch, endianness) = arch_to_object(ctx.arch);
+    let mut obj = Object::new(BinaryFormat::Elf, elf_arch, endianness);
+    let mut stats = SharedDataStats::default();
+
+    let mut data_slots: Vec<(object::write::SectionId, u64, u64)> = Vec::new();
+
+    if let Some(s) = ctx
+        .sections
+        .iter()
+        .find(|s| s.segment == "__DATA" && s.name == "__data")
+    {
+        let sid = obj.add_section(Vec::new(), b".data".to_vec(), SectionKind::Data);
+        obj.append_section_data(sid, &s.data, 16);
+        obj.add_symbol(Symbol {
+            name: ELF_SYM_DATA_START.to_vec(),
+            value: 0,
+            size: 0,
+            kind: SymbolKind::Data,
+            scope: SymbolScope::Dynamic,
+            weak: false,
+            section: SymbolSection::Section(sid),
+            flags: SymbolFlags::None,
+        });
+        data_slots.push((sid, s.addr, s.size));
+        stats.data_bytes = s.size;
+    }
+
+    if let Some(s) = ctx
+        .sections
+        .iter()
+        .find(|s| s.segment == "__DATA" && s.name == "__const")
+    {
+        let sid = obj.add_section(Vec::new(), b".rodata".to_vec(), SectionKind::ReadOnlyData);
+        obj.append_section_data(sid, &s.data, 16);
+        obj.add_symbol(Symbol {
+            name: ELF_SYM_RODATA_START.to_vec(),
+            value: 0,
+            size: 0,
+            kind: SymbolKind::Data,
+            scope: SymbolScope::Dynamic,
+            weak: false,
+            section: SymbolSection::Section(sid),
+            flags: SymbolFlags::None,
+        });
+        data_slots.push((sid, s.addr, s.size));
+        stats.const_bytes = s.size;
+    }
+
+    if let Some(s) = ctx
+        .sections
+        .iter()
+        .find(|s| s.segment == "__DATA" && s.name == "__bss")
+    {
+        let sid = obj.add_section(
+            Vec::new(),
+            b".bss".to_vec(),
+            SectionKind::UninitializedData,
+        );
+        obj.section_mut(sid).append_bss(s.size, 16);
+        obj.add_symbol(Symbol {
+            name: ELF_SYM_BSS_START.to_vec(),
+            value: 0,
+            size: 0,
+            kind: SymbolKind::Data,
+            scope: SymbolScope::Dynamic,
+            weak: false,
+            section: SymbolSection::Section(sid),
+            flags: SymbolFlags::None,
+        });
+        data_slots.push((sid, s.addr, s.size));
+        stats.bss_bytes = s.size;
+    }
+
+    for (var_va, var) in &ctx.symbols.variables {
+        for &(sid, sec_addr, sec_size) in &data_slots {
+            if *var_va >= sec_addr && *var_va < sec_addr + sec_size {
+                let offset = var_va - sec_addr;
+                let scope = if var.external {
+                    SymbolScope::Dynamic
+                } else {
+                    SymbolScope::Compilation
+                };
+                obj.add_symbol(Symbol {
+                    name: sanitize_symbol_name(var.symbol_name()),
+                    value: offset,
+                    size: 0,
+                    kind: SymbolKind::Data,
+                    scope,
+                    weak: false,
+                    section: SymbolSection::Section(sid),
+                    flags: SymbolFlags::None,
+                });
+                break;
+            }
+        }
+    }
+
+    let bytes = obj.write().context("serialize shared ELF object")?;
+    write_file(out_path, &bytes)?;
+    Ok(stats)
+}
+
+// ---------------------------------------------------------------------------
 // Symtab-driven split
 // ---------------------------------------------------------------------------
 
@@ -321,6 +582,7 @@ pub fn split_by_symtab(
     symtab: &crate::symtab_json::SymtabJson,
     lookup: &crate::symtab_json::SymtabLookup,
     out_dir: &Path,
+    emit_as_elf: bool,
 ) -> Result<Vec<CuOutcome>> {
     use crate::cu::{MachoCompilationUnit, MachoFunction};
 
@@ -374,7 +636,12 @@ pub fn split_by_symtab(
 
             // Use the cu field value directly as the output filename.
             let file = out_dir.join(cu_filename);
-            let result = emit_macho_cu(ctx, &cu, &file).map_err(|e| format!("{e:#}"));
+            let result = if emit_as_elf {
+                emit_elf_cu(ctx, &cu, &file)
+            } else {
+                emit_macho_cu(ctx, &cu, &file)
+            }
+            .map_err(|e| format!("{e:#}"));
             CuOutcome {
                 cu_id: id,
                 cu_name: cu_filename.to_string(),
@@ -391,7 +658,7 @@ pub fn split_by_symtab(
 // Parallel split (DWARF/STABS CU-based)
 // ---------------------------------------------------------------------------
 
-pub fn split_all_macho(ctx: &MachoContext, out_dir: &Path) -> Result<Vec<CuOutcome>> {
+pub fn split_all_macho(ctx: &MachoContext, out_dir: &Path, emit_as_elf: bool) -> Result<Vec<CuOutcome>> {
     std::fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
 
     let outcomes: Vec<CuOutcome> = ctx
@@ -402,7 +669,12 @@ pub fn split_all_macho(ctx: &MachoContext, out_dir: &Path) -> Result<Vec<CuOutco
         .map(|cu| {
             let stem = sanitize_file_stem(&cu.name);
             let file = out_dir.join(format!("{:04}_{stem}.o", cu.id));
-            let result = emit_macho_cu(ctx, cu, &file).map_err(|e| format!("{e:#}"));
+            let result = if emit_as_elf {
+                emit_elf_cu(ctx, cu, &file)
+            } else {
+                emit_macho_cu(ctx, cu, &file)
+            }
+            .map_err(|e| format!("{e:#}"));
             CuOutcome {
                 cu_id: cu.id,
                 cu_name: cu.name.clone(),
