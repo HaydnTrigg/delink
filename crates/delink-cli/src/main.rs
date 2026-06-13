@@ -122,13 +122,23 @@ enum Cmd {
         limit: usize,
     },
 
-    /// Split a Mach-O binary into one `.o` per DWARF CU plus `__shared_data.o`.
+    /// Split a Mach-O binary into one `.o` per function (symtab-driven) plus `__shared_data.o`.
+    ///
+    /// On the first run a `symtab.json` is generated in the output directory
+    /// listing every N_SECT function symbol with its raw symbol-table fields and
+    /// a `cu` field naming the output `.o` file.  Edit the `cu` values to group
+    /// functions and re-run with `--symtab` to produce the merged files.
     MachoSplit {
         /// Path to the Mach-O executable or dylib.
         input: PathBuf,
         /// Output directory for the `.o` files.
         #[arg(short, long)]
         outdir: PathBuf,
+        /// Path to an existing `symtab.json` to control function → file grouping.
+        /// If omitted a default symtab (one function per file) is created and
+        /// written to `<outdir>/symtab.json`.
+        #[arg(long)]
+        symtab: Option<PathBuf>,
     },
 }
 
@@ -180,7 +190,9 @@ fn main() -> Result<()> {
             contains,
             limit,
         } => cmd_macho_list_cus(&input, &contains, limit),
-        Cmd::MachoSplit { input, outdir } => cmd_macho_split(&input, &outdir),
+        Cmd::MachoSplit { input, outdir, symtab } => {
+            cmd_macho_split(&input, &outdir, symtab.as_deref())
+        }
     }
 }
 
@@ -612,31 +624,72 @@ fn cmd_macho_list_cus(path: &Path, contains: &str, limit: usize) -> Result<()> {
     Ok(())
 }
 
-fn cmd_macho_split(path: &Path, outdir: &Path) -> Result<()> {
-    let ctx = load_macho_context(path)?;
+fn cmd_macho_split(path: &Path, outdir: &Path, symtab_arg: Option<&Path>) -> Result<()> {
+    let data =
+        std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    tracing::info!("loaded Mach-O ({} bytes)", data.len());
+
+    let ctx = delink_macho::load_macho(&data)
+        .with_context(|| format!("load {}", path.display()))?;
+
     let input_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let arch_str = format!("{:?}", ctx.arch);
 
+    // ------------------------------------------------------------------
+    // Load or generate the symtab
+    // ------------------------------------------------------------------
+    let symtab: delink_macho::symtab_json::SymtabJson = if let Some(sp) = symtab_arg {
+        let raw = std::fs::read_to_string(sp)
+            .with_context(|| format!("read symtab {}", sp.display()))?;
+        serde_json::from_str(&raw)
+            .with_context(|| format!("parse symtab {}", sp.display()))?
+    } else {
+        delink_macho::symtab_json::generate(&data).context("generate symtab")?
+    };
+
+    let n_syms: usize = symtab.values().map(|v| v.len()).sum();
     tracing::info!(
-        "splitting {} CUs (with functions) in parallel",
-        ctx.cu_index
-            .units
-            .iter()
-            .filter(|u| u.functions.iter().any(|f| f.size > 0))
-            .count()
+        "symtab: {} symbols → {} output files",
+        n_syms,
+        symtab.len(),
     );
 
-    let outcomes = delink_macho::emit::split_all_macho(&ctx, outdir)?;
+    std::fs::create_dir_all(outdir)
+        .with_context(|| format!("create {}", outdir.display()))?;
+
+    // ------------------------------------------------------------------
+    // Write symtab.json into the output folder so the user can edit it
+    // and re-run with --symtab.
+    // ------------------------------------------------------------------
+    let symtab_out = outdir.join("symtab.json");
+    let symtab_json_str =
+        serde_json::to_string_pretty(&symtab).context("serialize symtab")?;
+    std::fs::write(&symtab_out, &symtab_json_str)
+        .with_context(|| format!("write {}", symtab_out.display()))?;
+    tracing::info!("symtab  → {}", symtab_out.display());
+
+    // ------------------------------------------------------------------
+    // Build lookup from the binary (addr/size/flags per symbol name)
+    // ------------------------------------------------------------------
+    let lookup = delink_macho::symtab_json::build_lookup(&data)
+        .context("build symtab lookup")?;
+
+    // ------------------------------------------------------------------
+    // Split using symtab grouping
+    // ------------------------------------------------------------------
+    let outcomes = delink_macho::emit::split_by_symtab(&ctx, &symtab, &lookup, outdir)?;
 
     let shared = outdir.join("__shared_data.o");
     tracing::info!("emitting shared data → {}", shared.display());
     let shared_stats = delink_macho::emit::emit_macho_shared(&ctx, &shared)?;
 
-    // Build manifest — keyed by filename, one entry per CU .o plus __shared_data.o.
+    // ------------------------------------------------------------------
+    // Build manifest.json
+    // ------------------------------------------------------------------
+
     let mut manifest = serde_json::Map::new();
 
     for o in &outcomes {
-        let cu = ctx.cu_index.units.get(o.cu_id);
         let file_name = o
             .file
             .file_name()
@@ -644,36 +697,29 @@ fn cmd_macho_split(path: &Path, outdir: &Path) -> Result<()> {
             .to_string_lossy()
             .into_owned();
 
-        let (functions_json, variables_json) = cu
-            .map(|cu| {
-                let fns: Vec<_> = cu
-                    .functions
-                    .iter()
-                    .map(|f| {
-                        serde_json::json!({
-                            "name": f.symbol_name(),
-                            "demangled": f.name,
-                            "addr": f.addr,
-                            "size": f.size,
-                            "external": f.external,
-                        })
-                    })
-                    .collect();
-                let vars: Vec<_> = cu
-                    .variables
-                    .iter()
-                    .map(|v| {
-                        serde_json::json!({
-                            "name": v.symbol_name(),
-                            "demangled": v.name,
-                            "addr": v.addr,
-                            "external": v.external,
-                        })
-                    })
-                    .collect();
-                (serde_json::Value::Array(fns), serde_json::Value::Array(vars))
+        let empty: Vec<String> = vec![];
+        let names = symtab.get(o.cu_name.as_str()).unwrap_or(&empty);
+        let mut resolved: Vec<_> = names
+            .iter()
+            .filter_map(|name| lookup.get(name.as_str()).map(|info| (name, info)))
+            .collect();
+        resolved.sort_by_key(|(_, info)| info.addr);
+
+        let functions_json: Vec<_> = resolved
+            .iter()
+            .map(|(name, info)| {
+                serde_json::json!({
+                    "name": name,
+                    "addr": info.addr,
+                    "size": info.size,
+                    "n_type": info.n_type,
+                    "n_sect": info.n_sect,
+                    "n_desc": info.n_desc,
+                    "external": info.external,
+                    "private_external": info.private_external,
+                })
             })
-            .unwrap_or((serde_json::json!([]), serde_json::json!([])));
+            .collect();
 
         let emit_json = match &o.result {
             Ok(s) => serde_json::json!({
@@ -691,19 +737,17 @@ fn cmd_macho_split(path: &Path, outdir: &Path) -> Result<()> {
             Err(e) => serde_json::Value::String(e.clone()),
         };
 
-        let entry = serde_json::json!({
-            "input_path": input_path.to_string_lossy(),
-            "output_path": o.file.canonicalize().unwrap_or_else(|_| o.file.clone()).to_string_lossy(),
-            "arch": arch_str,
-            "cu_name": cu.map(|c| c.name.as_str()),
-            "comp_dir": cu.and_then(|c| c.comp_dir.as_deref()),
-            "oso_path": cu.and_then(|c| c.oso_path.as_deref()),
-            "functions": functions_json,
-            "variables": variables_json,
-            "emit": emit_json,
-            "error": error_json,
-        });
-        manifest.insert(file_name, entry);
+        manifest.insert(
+            file_name,
+            serde_json::json!({
+                "input_path": input_path.to_string_lossy(),
+                "output_path": o.file.canonicalize().unwrap_or_else(|_| o.file.clone()).to_string_lossy(),
+                "arch": arch_str,
+                "functions": functions_json,
+                "emit": emit_json,
+                "error": error_json,
+            }),
+        );
     }
 
     // Shared data entry.
@@ -731,9 +775,6 @@ fn cmd_macho_split(path: &Path, outdir: &Path) -> Result<()> {
             "input_path": input_path.to_string_lossy(),
             "output_path": shared.canonicalize().unwrap_or_else(|_| shared.clone()).to_string_lossy(),
             "arch": arch_str,
-            "cu_name": null,
-            "comp_dir": null,
-            "oso_path": null,
             "functions": [],
             "variables": shared_vars,
             "emit": {
@@ -752,6 +793,9 @@ fn cmd_macho_split(path: &Path, outdir: &Path) -> Result<()> {
         .with_context(|| format!("write {}", manifest_path.display()))?;
     tracing::info!("manifest → {}", manifest_path.display());
 
+    // ------------------------------------------------------------------
+    // Summary
+    // ------------------------------------------------------------------
     let mut total = delink_macho::EmitStats::default();
     let mut failures = 0usize;
     for o in &outcomes {
@@ -772,7 +816,7 @@ fn cmd_macho_split(path: &Path, outdir: &Path) -> Result<()> {
     }
 
     println!(
-        "macho-split complete: {} CUs ({} failed)\n  {} bytes .text, {} instructions\n  {} local + {} undef symbols\n  {} relocs ({} unresolved calls)\n  shared: data={} const={} bss={}",
+        "macho-split complete: {} files ({} failed)\n  {} bytes .text, {} instructions\n  {} local + {} undef symbols\n  {} relocs ({} unresolved calls)\n  shared: data={} const={} bss={}",
         outcomes.len().saturating_sub(failures),
         failures,
         total.text_bytes,

@@ -12,6 +12,8 @@ use std::collections::HashMap;
 pub mod cu;
 pub mod emit;
 pub mod stabs;
+pub mod symtab_json;
+pub mod symtab_split;
 pub mod symbols;
 
 pub use cu::{MachoCompilationUnit, MachoCuIndex, MachoFunction, MachoVariable};
@@ -28,6 +30,10 @@ pub enum MachoArch {
     X86,
     /// 64-bit x86-64.
     X86_64,
+    /// 32-bit PowerPC (big-endian).
+    PPC,
+    /// 64-bit PowerPC (big-endian).
+    PPC64,
 }
 
 /// A single Mach-O section with its raw bytes and metadata.
@@ -65,6 +71,7 @@ impl MachoSection {
 /// All parsed data from a Mach-O binary.
 pub struct MachoContext {
     pub arch: MachoArch,
+    pub little_endian: bool,
     pub sections: Vec<MachoSection>,
     pub cu_index: MachoCuIndex,
     pub symbols: MachoGlobalSymbols,
@@ -90,6 +97,8 @@ pub fn load_macho(data: &[u8]) -> Result<MachoContext> {
     let arch = match file.architecture() {
         object::Architecture::I386 => MachoArch::X86,
         object::Architecture::X86_64 => MachoArch::X86_64,
+        object::Architecture::PowerPc => MachoArch::PPC,
+        object::Architecture::PowerPc64 => MachoArch::PPC64,
         other => {
             return Err(anyhow!(
                 "unsupported Mach-O architecture: {:?}",
@@ -97,6 +106,8 @@ pub fn load_macho(data: &[u8]) -> Result<MachoContext> {
             ))
         }
     };
+
+    let little_endian = file.is_little_endian();
 
     let sections = parse_sections(&file)?;
     let stubs = parse_stubs(data).unwrap_or_else(|e| {
@@ -108,11 +119,17 @@ pub fn load_macho(data: &[u8]) -> Result<MachoContext> {
     let cu_index = {
         let dwarf = load_dwarf(data, &file)?;
         let idx = cu::build_cu_index(&dwarf)?;
-        if idx.units.is_empty() {
-            tracing::info!("no DWARF CUs found; falling back to STABS");
-            stabs::build_cu_index_from_stabs(data)?
-        } else {
+        if !idx.units.is_empty() {
             idx
+        } else {
+            tracing::info!("no DWARF CUs found; falling back to STABS");
+            let stabs_idx = stabs::build_cu_index_from_stabs(data, little_endian)?;
+            if !stabs_idx.units.is_empty() {
+                stabs_idx
+            } else {
+                tracing::info!("no STABS CUs found; falling back to symtab-based split");
+                symtab_split::build_cu_index_from_symtab(data)?
+            }
         }
     };
 
@@ -120,6 +137,7 @@ pub fn load_macho(data: &[u8]) -> Result<MachoContext> {
 
     Ok(MachoContext {
         arch,
+        little_endian,
         sections,
         cu_index,
         symbols,

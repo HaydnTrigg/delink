@@ -3,6 +3,9 @@
 //! Reconstructs compilation units from LC_SYMTAB STABS entries when the
 //! binary has no `__DWARF` segment.  Produces the same `MachoCuIndex`
 //! types as the DWARF path so the rest of the pipeline is unaffected.
+//!
+//! Supports both little-endian (x86/x86-64) and big-endian (PPC/PPC64)
+//! Mach-O binaries.
 
 use anyhow::Result;
 
@@ -23,8 +26,8 @@ struct Nl {
     value: u32,
 }
 
-pub fn build_cu_index_from_stabs(data: &[u8]) -> Result<MachoCuIndex> {
-    let (syms, str_data) = match find_symtab(data) {
+pub fn build_cu_index_from_stabs(data: &[u8], little_endian: bool) -> Result<MachoCuIndex> {
+    let (syms, str_data) = match find_symtab(data, little_endian) {
         Some(v) => v,
         None => return Ok(MachoCuIndex { units: vec![] }),
     };
@@ -162,12 +165,18 @@ pub fn build_cu_index_from_stabs(data: &[u8]) -> Result<MachoCuIndex> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn find_symtab(data: &[u8]) -> Option<(Vec<Nl>, &[u8])> {
+fn find_symtab(data: &[u8], le: bool) -> Option<(Vec<Nl>, &[u8])> {
     if data.len() < 28 {
         return None;
     }
-    let ncmds = u32::from_le_bytes(data[16..20].try_into().ok()?) as usize;
-    let sizeofcmds = u32::from_le_bytes(data[20..24].try_into().ok()?) as usize;
+
+    let r32 = |off: usize| -> Option<u32> {
+        let b: [u8; 4] = data.get(off..off + 4)?.try_into().ok()?;
+        Some(if le { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) })
+    };
+
+    let ncmds = r32(16)? as usize;
+    let sizeofcmds = r32(20)? as usize;
     let cmds_end = (28 + sizeofcmds).min(data.len());
 
     let mut symtab_off = 0u32;
@@ -177,12 +186,12 @@ fn find_symtab(data: &[u8]) -> Option<(Vec<Nl>, &[u8])> {
     let mut pos = 28usize;
     let mut count = 0;
     while pos + 8 <= cmds_end && count < ncmds {
-        let cmd = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?);
-        let cmdsize = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().ok()?) as usize;
+        let cmd = r32(pos)?;
+        let cmdsize = r32(pos + 4)? as usize;
         if cmd == 0x2 && cmdsize >= 24 {
-            symtab_off = u32::from_le_bytes(data[pos + 8..pos + 12].try_into().ok()?);
-            nsyms = u32::from_le_bytes(data[pos + 12..pos + 16].try_into().ok()?);
-            stroff = u32::from_le_bytes(data[pos + 16..pos + 20].try_into().ok()?);
+            symtab_off = r32(pos + 8)?;
+            nsyms = r32(pos + 12)?;
+            stroff = r32(pos + 16)?;
             break;
         }
         if cmdsize == 0 {
@@ -209,6 +218,11 @@ fn find_symtab(data: &[u8]) -> Option<(Vec<Nl>, &[u8])> {
         &[]
     };
 
+    let r32_chunk = |chunk: &[u8], off: usize| -> u32 {
+        let b: [u8; 4] = chunk[off..off + 4].try_into().unwrap();
+        if le { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) }
+    };
+
     let mut syms = Vec::with_capacity(nsyms as usize);
     for chunk in sym_data.chunks_exact(12) {
         let ntype = chunk[4];
@@ -218,9 +232,9 @@ fn find_symtab(data: &[u8]) -> Option<(Vec<Nl>, &[u8])> {
             continue;
         }
         syms.push(Nl {
-            strx: u32::from_le_bytes(chunk[0..4].try_into().unwrap()),
+            strx: r32_chunk(chunk, 0),
             ntype,
-            value: u32::from_le_bytes(chunk[8..12].try_into().unwrap()),
+            value: r32_chunk(chunk, 8),
         });
     }
 

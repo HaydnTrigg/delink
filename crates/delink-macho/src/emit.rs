@@ -74,17 +74,15 @@ pub fn emit_macho_cu(
     }
     live.sort_by_key(|f| f.addr);
 
-    let macho_arch = match ctx.arch {
-        MachoArch::X86 => Architecture::I386,
-        MachoArch::X86_64 => Architecture::X86_64,
-    };
-    let mut obj = Object::new(BinaryFormat::MachO, macho_arch, Endianness::Little);
+    let (macho_arch, endianness) = arch_to_object(ctx.arch);
+    let mut obj = Object::new(BinaryFormat::MachO, macho_arch, endianness);
     let mut local_syms: HashMap<String, SymbolId> = HashMap::new();
     let mut undef_cache: HashMap<String, SymbolId> = HashMap::new();
 
     let text_sid = obj.add_section(b"__TEXT".to_vec(), b"__text".to_vec(), SectionKind::Text);
 
     let mut stats = EmitStats::default();
+    let recover_x86 = ctx.arch == MachoArch::X86;
 
     for f in &live {
         let fn_start = (f.addr - text_section.addr) as usize;
@@ -100,21 +98,27 @@ pub fn emit_macho_cu(
         let mut fn_bytes = text_section.data[fn_start..fn_end].to_vec();
         stats.text_bytes += f.size;
 
-        let recovery =
-            delink_x86::recover(&fn_bytes, f.addr, f.size, &ctx.symbols).with_context(|| {
-                format!("recover relocs for '{}' at {:#x}", f.name, f.addr)
-            })?;
-
-        stats.instructions += recovery.diag.instructions;
-        stats.unresolved_calls += recovery.diag.calls_unresolved;
-
-        // Zero the rel32 displacement fields before appending.
-        for r in &recovery.relocs {
-            let off = r.offset as usize;
-            if off + 4 <= fn_bytes.len() {
-                fn_bytes[off..off + 4].fill(0);
+        // For x86 we recover pc-relative relocations from the instruction stream.
+        // For other architectures (PPC etc.) we emit raw bytes without synthetic
+        // relocations — the bytes are correct but non-relocatable.
+        let relocs_to_emit: Vec<delink_x86::recover::RecoveredReloc> = if recover_x86 {
+            let recovery =
+                delink_x86::recover(&fn_bytes, f.addr, f.size, &ctx.symbols).with_context(
+                    || format!("recover relocs for '{}' at {:#x}", f.name, f.addr),
+                )?;
+            stats.instructions += recovery.diag.instructions;
+            stats.unresolved_calls += recovery.diag.calls_unresolved;
+            // Zero the rel32 displacement fields before appending.
+            for r in &recovery.relocs {
+                let off = r.offset as usize;
+                if off + 4 <= fn_bytes.len() {
+                    fn_bytes[off..off + 4].fill(0);
+                }
             }
-        }
+            recovery.relocs
+        } else {
+            vec![]
+        };
 
         let fn_offset = obj.append_section_data(text_sid, &fn_bytes, 4);
 
@@ -164,8 +168,8 @@ pub fn emit_macho_cu(
             local_syms.insert(var.symbol_name().to_string(), label_id);
         }
 
-        // Emit relocations.
-        for r in &recovery.relocs {
+        // Emit synthetic relocations (x86 only).
+        for r in &relocs_to_emit {
             let sym_id = resolve_symbol(&mut obj, &local_syms, &mut undef_cache, &r.target);
             obj.add_relocation(
                 text_sid,
@@ -207,11 +211,8 @@ pub fn emit_macho_cu(
 // ---------------------------------------------------------------------------
 
 pub fn emit_macho_shared(ctx: &MachoContext, out_path: &Path) -> Result<SharedDataStats> {
-    let macho_arch = match ctx.arch {
-        MachoArch::X86 => Architecture::I386,
-        MachoArch::X86_64 => Architecture::X86_64,
-    };
-    let mut obj = Object::new(BinaryFormat::MachO, macho_arch, Endianness::Little);
+    let (macho_arch, endianness) = arch_to_object(ctx.arch);
+    let mut obj = Object::new(BinaryFormat::MachO, macho_arch, endianness);
     let mut stats = SharedDataStats::default();
 
     // Track (section_id, section_va, section_size) for each data section added.
@@ -319,7 +320,88 @@ pub fn emit_macho_shared(ctx: &MachoContext, out_path: &Path) -> Result<SharedDa
 }
 
 // ---------------------------------------------------------------------------
-// Parallel split
+// Symtab-driven split
+// ---------------------------------------------------------------------------
+
+/// Split driven by a user-editable `SymtabJson`.
+///
+/// Functions that share the same `cu` field are emitted into one object file
+/// whose name is exactly that `cu` value.  The output path for each file is
+/// `out_dir/<cu>`.
+pub fn split_by_symtab(
+    ctx: &MachoContext,
+    symtab: &crate::symtab_json::SymtabJson,
+    lookup: &crate::symtab_json::SymtabLookup,
+    out_dir: &Path,
+) -> Result<Vec<CuOutcome>> {
+    use crate::cu::{MachoCompilationUnit, MachoFunction};
+
+    std::fs::create_dir_all(out_dir)
+        .with_context(|| format!("create {}", out_dir.display()))?;
+
+    let group_vec: Vec<(&String, &Vec<String>)> = symtab.iter().collect();
+
+    let outcomes: Vec<CuOutcome> = group_vec
+        .par_iter()
+        .enumerate()
+        .map(|(id, (cu_filename, names))| {
+            let mut resolved: Vec<(String, u64, u64, bool)> = names
+                .iter()
+                .filter_map(|name| {
+                    lookup.get(name.as_str()).map(|info| {
+                        (name.clone(), info.addr, info.size, info.external)
+                    })
+                })
+                .collect();
+            resolved.sort_by_key(|(_, addr, _, _)| *addr);
+
+            let functions: Vec<MachoFunction> = resolved
+                .iter()
+                .map(|(name, addr, size, external)| MachoFunction {
+                    name: name.clone(),
+                    linkage_name: Some(name.clone()),
+                    addr: *addr,
+                    size: *size,
+                    external: *external,
+                })
+                .collect();
+
+            let ranges = functions
+                .iter()
+                .filter(|f| f.size > 0)
+                .map(|f| f.addr..f.addr + f.size)
+                .collect();
+
+            let cu = MachoCompilationUnit {
+                id,
+                name: cu_filename
+                    .strip_suffix(".o")
+                    .unwrap_or(cu_filename)
+                    .to_string(),
+                comp_dir: None,
+                oso_path: None,
+                ranges,
+                functions,
+                variables: vec![],
+            };
+
+            // Use the cu field value directly as the output filename.
+            let file = out_dir.join(cu_filename);
+            let result = emit_macho_cu(ctx, &cu, &file).map_err(|e| format!("{e:#}"));
+            CuOutcome {
+                cu_id: id,
+                cu_name: cu_filename.to_string(),
+                file,
+                result,
+            }
+        })
+        .collect();
+
+    Ok(outcomes)
+}
+
+// ---------------------------------------------------------------------------
+// Parallel split (DWARF/STABS CU-based)
 // ---------------------------------------------------------------------------
 
 pub fn split_all_macho(ctx: &MachoContext, out_dir: &Path) -> Result<Vec<CuOutcome>> {
@@ -409,4 +491,13 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
         std::fs::create_dir_all(parent).ok();
     }
     std::fs::write(path, bytes).with_context(|| format!("write {}", path.display()))
+}
+
+fn arch_to_object(arch: MachoArch) -> (Architecture, Endianness) {
+    match arch {
+        MachoArch::X86 => (Architecture::I386, Endianness::Little),
+        MachoArch::X86_64 => (Architecture::X86_64, Endianness::Little),
+        MachoArch::PPC => (Architecture::PowerPc, Endianness::Big),
+        MachoArch::PPC64 => (Architecture::PowerPc64, Endianness::Big),
+    }
 }

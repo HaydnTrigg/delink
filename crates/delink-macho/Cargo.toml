@@ -11,4 +11,5 @@ tracing = { workspace = true }
 object = { workspace = true }
 gimli = { workspace = true }
 rayon = { workspace = true }
+serde = { workspace = true }
 delink-x86 = { workspace = true }
