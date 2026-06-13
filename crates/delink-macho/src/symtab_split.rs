@@ -79,8 +79,6 @@ pub fn build_cu_index_from_symtab(data: &[u8]) -> Result<MachoCuIndex> {
 
     // Group into batches and build CUs.
     let mut units = Vec::new();
-    let mut cu_id = 0usize;
-
     for (batch_idx, batch) in fns.chunks(BATCH_SIZE).enumerate() {
         let batch_start = batch_idx * BATCH_SIZE;
         let functions: Vec<MachoFunction> = batch
@@ -104,7 +102,7 @@ pub fn build_cu_index_from_symtab(data: &[u8]) -> Result<MachoCuIndex> {
         let cu_name = functions[0].name.clone();
 
         units.push(MachoCompilationUnit {
-            id: cu_id,
+            id: batch_idx,
             name: cu_name,
             comp_dir: None,
             oso_path: None,
@@ -112,7 +110,6 @@ pub fn build_cu_index_from_symtab(data: &[u8]) -> Result<MachoCuIndex> {
             functions,
             variables: vec![],
         });
-        cu_id += 1;
     }
 
     Ok(MachoCuIndex { units })

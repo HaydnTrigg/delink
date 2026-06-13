@@ -369,7 +369,7 @@ fn sanitize_filename(name: &str) -> String {
             }
         })
         .collect();
-    let trimmed = s.trim_start_matches(|c: char| c == '.' || c == '_');
+    let trimmed = s.trim_start_matches(['.', '_']);
     let truncated = &trimmed[..trimmed.len().min(200)];
     if truncated.is_empty() {
         "unknown".to_string()

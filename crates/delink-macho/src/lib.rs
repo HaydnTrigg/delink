@@ -267,28 +267,26 @@ fn parse_stubs_32(data: &[u8]) -> Result<HashMap<u64, String>> {
                         u32::from_le_bytes(data[pos + 60..pos + 64].try_into().unwrap());
                 }
             }
-            LC_SEGMENT => {
-                if cmdsize >= SEGMENT_CMD32_SIZE {
-                    // nsects at offset 48 within segment_command_32
-                    let nsects =
-                        u32::from_le_bytes(data[pos + 48..pos + 52].try_into().unwrap()) as usize;
-                    for i in 0..nsects {
-                        let sec_base = pos + SEGMENT_CMD32_SIZE + i * SECTION32_SIZE;
-                        if sec_base + SECTION32_SIZE > cmds_end {
-                            break;
-                        }
-                        let sec = &data[sec_base..sec_base + SECTION32_SIZE];
-                        // section_32: addr[32..36] size[36..40] flags[56..60]
-                        //             reserved1[60..64] reserved2[64..68]
-                        let flags = u32::from_le_bytes(sec[56..60].try_into().unwrap());
-                        if flags & SECTION_TYPE == S_SYMBOL_STUBS {
-                            let addr = u32::from_le_bytes(sec[32..36].try_into().unwrap()) as u64;
-                            let size = u32::from_le_bytes(sec[36..40].try_into().unwrap()) as u64;
-                            let reserved1 = u32::from_le_bytes(sec[60..64].try_into().unwrap());
-                            let reserved2 = u32::from_le_bytes(sec[64..68].try_into().unwrap());
-                            if reserved2 > 0 && size > 0 {
-                                stub_secs.push((addr, size, reserved1, reserved2));
-                            }
+            LC_SEGMENT if cmdsize >= SEGMENT_CMD32_SIZE => {
+                // nsects at offset 48 within segment_command_32
+                let nsects =
+                    u32::from_le_bytes(data[pos + 48..pos + 52].try_into().unwrap()) as usize;
+                for i in 0..nsects {
+                    let sec_base = pos + SEGMENT_CMD32_SIZE + i * SECTION32_SIZE;
+                    if sec_base + SECTION32_SIZE > cmds_end {
+                        break;
+                    }
+                    let sec = &data[sec_base..sec_base + SECTION32_SIZE];
+                    // section_32: addr[32..36] size[36..40] flags[56..60]
+                    //             reserved1[60..64] reserved2[64..68]
+                    let flags = u32::from_le_bytes(sec[56..60].try_into().unwrap());
+                    if flags & SECTION_TYPE == S_SYMBOL_STUBS {
+                        let addr = u32::from_le_bytes(sec[32..36].try_into().unwrap()) as u64;
+                        let size = u32::from_le_bytes(sec[36..40].try_into().unwrap()) as u64;
+                        let reserved1 = u32::from_le_bytes(sec[60..64].try_into().unwrap());
+                        let reserved2 = u32::from_le_bytes(sec[64..68].try_into().unwrap());
+                        if reserved2 > 0 && size > 0 {
+                            stub_secs.push((addr, size, reserved1, reserved2));
                         }
                     }
                 }
