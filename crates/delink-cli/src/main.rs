@@ -614,6 +614,8 @@ fn cmd_macho_list_cus(path: &Path, contains: &str, limit: usize) -> Result<()> {
 
 fn cmd_macho_split(path: &Path, outdir: &Path) -> Result<()> {
     let ctx = load_macho_context(path)?;
+    let input_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let arch_str = format!("{:?}", ctx.arch);
 
     tracing::info!(
         "splitting {} CUs (with functions) in parallel",
@@ -629,6 +631,126 @@ fn cmd_macho_split(path: &Path, outdir: &Path) -> Result<()> {
     let shared = outdir.join("__shared_data.o");
     tracing::info!("emitting shared data → {}", shared.display());
     let shared_stats = delink_macho::emit::emit_macho_shared(&ctx, &shared)?;
+
+    // Build manifest — keyed by filename, one entry per CU .o plus __shared_data.o.
+    let mut manifest = serde_json::Map::new();
+
+    for o in &outcomes {
+        let cu = ctx.cu_index.units.get(o.cu_id);
+        let file_name = o
+            .file
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+
+        let (functions_json, variables_json) = cu
+            .map(|cu| {
+                let fns: Vec<_> = cu
+                    .functions
+                    .iter()
+                    .map(|f| {
+                        serde_json::json!({
+                            "name": f.symbol_name(),
+                            "demangled": f.name,
+                            "addr": f.addr,
+                            "size": f.size,
+                            "external": f.external,
+                        })
+                    })
+                    .collect();
+                let vars: Vec<_> = cu
+                    .variables
+                    .iter()
+                    .map(|v| {
+                        serde_json::json!({
+                            "name": v.symbol_name(),
+                            "demangled": v.name,
+                            "addr": v.addr,
+                            "external": v.external,
+                        })
+                    })
+                    .collect();
+                (serde_json::Value::Array(fns), serde_json::Value::Array(vars))
+            })
+            .unwrap_or((serde_json::json!([]), serde_json::json!([])));
+
+        let emit_json = match &o.result {
+            Ok(s) => serde_json::json!({
+                "text_bytes": s.text_bytes,
+                "instructions": s.instructions,
+                "local_symbols": s.local_symbols,
+                "undef_symbols": s.undef_symbols,
+                "relocations": s.relocations,
+                "unresolved_calls": s.unresolved_calls,
+            }),
+            Err(_) => serde_json::Value::Null,
+        };
+        let error_json = match &o.result {
+            Ok(_) => serde_json::Value::Null,
+            Err(e) => serde_json::Value::String(e.clone()),
+        };
+
+        let entry = serde_json::json!({
+            "input_path": input_path.to_string_lossy(),
+            "output_path": o.file.canonicalize().unwrap_or_else(|_| o.file.clone()).to_string_lossy(),
+            "arch": arch_str,
+            "cu_name": cu.map(|c| c.name.as_str()),
+            "comp_dir": cu.and_then(|c| c.comp_dir.as_deref()),
+            "oso_path": cu.and_then(|c| c.oso_path.as_deref()),
+            "functions": functions_json,
+            "variables": variables_json,
+            "emit": emit_json,
+            "error": error_json,
+        });
+        manifest.insert(file_name, entry);
+    }
+
+    // Shared data entry.
+    let shared_vars: Vec<_> = ctx
+        .symbols
+        .variables
+        .iter()
+        .map(|(addr, v)| {
+            serde_json::json!({
+                "name": v.symbol_name(),
+                "demangled": v.name,
+                "addr": addr,
+                "external": v.external,
+            })
+        })
+        .collect();
+    let shared_name = shared
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    manifest.insert(
+        shared_name,
+        serde_json::json!({
+            "input_path": input_path.to_string_lossy(),
+            "output_path": shared.canonicalize().unwrap_or_else(|_| shared.clone()).to_string_lossy(),
+            "arch": arch_str,
+            "cu_name": null,
+            "comp_dir": null,
+            "oso_path": null,
+            "functions": [],
+            "variables": shared_vars,
+            "emit": {
+                "data_bytes": shared_stats.data_bytes,
+                "const_bytes": shared_stats.const_bytes,
+                "bss_bytes": shared_stats.bss_bytes,
+            },
+            "error": null,
+        }),
+    );
+
+    let manifest_path = outdir.join("manifest.json");
+    let json_str = serde_json::to_string_pretty(&serde_json::Value::Object(manifest))
+        .context("serialize manifest")?;
+    std::fs::write(&manifest_path, json_str)
+        .with_context(|| format!("write {}", manifest_path.display()))?;
+    tracing::info!("manifest → {}", manifest_path.display());
 
     let mut total = delink_macho::EmitStats::default();
     let mut failures = 0usize;

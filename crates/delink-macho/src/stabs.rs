@@ -69,10 +69,14 @@ pub fn build_cu_index_from_stabs(data: &[u8]) -> Result<MachoCuIndex> {
                 (None, so1)
             };
 
-        // Skip optional N_OSO (object file path).
-        if i < syms.len() && syms[i].ntype == N_OSO {
+        // Capture optional N_OSO (original object file / archive member path).
+        let oso_path = if i < syms.len() && syms[i].ntype == N_OSO {
+            let s = read_str(syms[i].strx);
             i += 1;
-        }
+            if s.is_empty() { None } else { Some(s) }
+        } else {
+            None
+        };
 
         // Collect functions and variables until the next N_SO.
         let mut functions: Vec<MachoFunction> = Vec::new();
@@ -142,6 +146,7 @@ pub fn build_cu_index_from_stabs(data: &[u8]) -> Result<MachoCuIndex> {
             id: cu_id,
             name: cu_name,
             comp_dir,
+            oso_path,
             ranges,
             functions,
             variables,

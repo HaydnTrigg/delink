@@ -44,6 +44,7 @@ pub struct SharedDataStats {
 
 #[derive(Debug)]
 pub struct CuOutcome {
+    pub cu_id: usize,
     pub cu_name: String,
     pub file: std::path::PathBuf,
     pub result: std::result::Result<EmitStats, String>,
@@ -335,6 +336,7 @@ pub fn split_all_macho(ctx: &MachoContext, out_dir: &Path) -> Result<Vec<CuOutco
             let file = out_dir.join(format!("{:04}_{stem}.o", cu.id));
             let result = emit_macho_cu(ctx, cu, &file).map_err(|e| format!("{e:#}"));
             CuOutcome {
+                cu_id: cu.id,
                 cu_name: cu.name.clone(),
                 file,
                 result,

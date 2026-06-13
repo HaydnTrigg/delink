@@ -45,6 +45,8 @@ pub struct MachoCompilationUnit {
     pub id: usize,
     pub name: String,
     pub comp_dir: Option<String>,
+    /// Path to the original object file, as recorded in STABS N_OSO or DWARF DW_AT_comp_dir.
+    pub oso_path: Option<String>,
     pub ranges: Vec<Range<u64>>,
     pub functions: Vec<MachoFunction>,
     pub variables: Vec<MachoVariable>,
@@ -142,6 +144,7 @@ fn build_unit(
         id,
         name,
         comp_dir,
+        oso_path: None,
         ranges,
         functions,
         variables,
