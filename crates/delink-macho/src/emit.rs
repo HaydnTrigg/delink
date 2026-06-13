@@ -239,7 +239,7 @@ pub fn emit_elf_cu(
     let mut local_syms: HashMap<String, SymbolId> = HashMap::new();
     let mut undef_cache: HashMap<String, SymbolId> = HashMap::new();
 
-    let text_sid = obj.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
+    let text_sid = obj.add_section(Vec::new(), b"__text".to_vec(), SectionKind::Text);
 
     let mut stats = EmitStats::default();
     let recover_x86 = ctx.arch == MachoArch::X86;
@@ -477,7 +477,7 @@ pub fn emit_elf_shared(ctx: &MachoContext, out_path: &Path) -> Result<SharedData
         .iter()
         .find(|s| s.segment == "__DATA" && s.name == "__data")
     {
-        let sid = obj.add_section(Vec::new(), b".data".to_vec(), SectionKind::Data);
+        let sid = obj.add_section(Vec::new(), b"__data".to_vec(), SectionKind::Data);
         obj.append_section_data(sid, &s.data, 16);
         obj.add_symbol(Symbol {
             name: ELF_SYM_DATA_START.to_vec(),
@@ -498,7 +498,7 @@ pub fn emit_elf_shared(ctx: &MachoContext, out_path: &Path) -> Result<SharedData
         .iter()
         .find(|s| s.segment == "__DATA" && s.name == "__const")
     {
-        let sid = obj.add_section(Vec::new(), b".rodata".to_vec(), SectionKind::ReadOnlyData);
+        let sid = obj.add_section(Vec::new(), b"__const".to_vec(), SectionKind::ReadOnlyData);
         obj.append_section_data(sid, &s.data, 16);
         obj.add_symbol(Symbol {
             name: ELF_SYM_RODATA_START.to_vec(),
@@ -519,7 +519,11 @@ pub fn emit_elf_shared(ctx: &MachoContext, out_path: &Path) -> Result<SharedData
         .iter()
         .find(|s| s.segment == "__DATA" && s.name == "__bss")
     {
-        let sid = obj.add_section(Vec::new(), b".bss".to_vec(), SectionKind::UninitializedData);
+        let sid = obj.add_section(
+            Vec::new(),
+            b"__bss".to_vec(),
+            SectionKind::UninitializedData,
+        );
         obj.section_mut(sid).append_bss(s.size, 16);
         obj.add_symbol(Symbol {
             name: ELF_SYM_BSS_START.to_vec(),
