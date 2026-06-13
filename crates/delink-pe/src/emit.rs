@@ -280,7 +280,7 @@ pub fn emit_pe_cu(pe: &PeContext, cu: &PeCompilationUnit, out_path: &Path) -> Re
                     }
                 }
 
-                let fn_offset = obj.append_section_data(sid, &fn_bytes, 4);
+                let fn_offset = obj.append_section_data(sid, &fn_bytes, 1);
 
                 let scope = if f.is_public {
                     SymbolScope::Dynamic
