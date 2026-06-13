@@ -3,7 +3,12 @@
 [Build Status]: https://github.com/HaydnTrigg/delink/actions/workflows/build.yaml/badge.svg
 [actions]: https://github.com/HaydnTrigg/delink/actions
 
-A splitting tool for decompilation projects for Shared Object (.so) files with DWARF and Windows Executables with PDB's (.exe/.pdb).
+A splitting tool for decompilation projects.
+
+## Supported Formats:
+- Shared Object (.so) files with DWARF
+- Mach-O STABS and SYMTAB
+- Windows PE with PDB's (.exe/.pdb).
 
 ## Building
 
