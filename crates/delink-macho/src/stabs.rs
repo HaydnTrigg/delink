@@ -29,7 +29,12 @@ struct Nl {
 pub fn build_cu_index_from_stabs(data: &[u8], little_endian: bool) -> Result<MachoCuIndex> {
     let (syms, str_data) = match find_symtab(data, little_endian) {
         Some(v) => v,
-        None => return Ok(MachoCuIndex { units: vec![] }),
+        None => {
+            return Ok(MachoCuIndex {
+                units: vec![],
+                source: crate::cu::DebugInfoSource::Stabs,
+            })
+        }
     };
 
     let read_str = |strx: u32| -> String {
@@ -159,7 +164,10 @@ pub fn build_cu_index_from_stabs(data: &[u8], little_endian: bool) -> Result<Mac
     }
 
     tracing::info!("STABS: parsed {} compilation units", units.len());
-    Ok(MachoCuIndex { units })
+    Ok(MachoCuIndex {
+        units,
+        source: crate::cu::DebugInfoSource::Stabs,
+    })
 }
 
 // ---------------------------------------------------------------------------

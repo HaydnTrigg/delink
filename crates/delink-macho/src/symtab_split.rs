@@ -58,7 +58,10 @@ pub fn build_cu_index_from_symtab(data: &[u8]) -> Result<MachoCuIndex> {
 
     if fns.is_empty() {
         tracing::warn!("symtab fallback: no text symbols found");
-        return Ok(MachoCuIndex { units: vec![] });
+        return Ok(MachoCuIndex {
+            units: vec![],
+            source: crate::cu::DebugInfoSource::Symtab,
+        });
     }
 
     fns.sort_by_key(|(addr, _)| *addr);
@@ -112,5 +115,8 @@ pub fn build_cu_index_from_symtab(data: &[u8]) -> Result<MachoCuIndex> {
         });
     }
 
-    Ok(MachoCuIndex { units })
+    Ok(MachoCuIndex {
+        units,
+        source: crate::cu::DebugInfoSource::Symtab,
+    })
 }

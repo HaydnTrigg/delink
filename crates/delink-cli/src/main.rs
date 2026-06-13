@@ -646,42 +646,194 @@ fn cmd_macho_split(path: &Path, outdir: &Path, symtab_arg: Option<&Path>, emit_a
     let input_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let arch_str = format!("{:?}", ctx.arch);
 
-    // ------------------------------------------------------------------
-    // Load or generate the symtab
-    // ------------------------------------------------------------------
-    let symtab: delink_macho::symtab_json::SymtabJson = if let Some(sp) = symtab_arg {
-        let raw =
-            std::fs::read_to_string(sp).with_context(|| format!("read symtab {}", sp.display()))?;
-        serde_json::from_str(&raw).with_context(|| format!("parse symtab {}", sp.display()))?
-    } else {
-        delink_macho::symtab_json::generate(&data).context("generate symtab")?
-    };
-
-    let n_syms: usize = symtab.values().map(|v| v.len()).sum();
-    tracing::info!("symtab: {} symbols → {} output files", n_syms, symtab.len(),);
-
     std::fs::create_dir_all(outdir).with_context(|| format!("create {}", outdir.display()))?;
 
     // ------------------------------------------------------------------
-    // Write symtab.json into the output folder so the user can edit it
-    // and re-run with --symtab.
+    // Choose split strategy:
+    //   • --symtab provided  → always symtab-driven (user override)
+    //   • DWARF / STABS      → use the CU index from debug info directly
+    //   • Symtab fallback    → generate a flat per-symbol symtab.json
     // ------------------------------------------------------------------
-    let symtab_out = outdir.join("symtab.json");
-    let symtab_json_str = serde_json::to_string_pretty(&symtab).context("serialize symtab")?;
-    std::fs::write(&symtab_out, &symtab_json_str)
-        .with_context(|| format!("write {}", symtab_out.display()))?;
-    tracing::info!("symtab  → {}", symtab_out.display());
+    let use_debug_info = symtab_arg.is_none()
+        && matches!(
+            ctx.cu_index.source,
+            delink_macho::DebugInfoSource::Dwarf | delink_macho::DebugInfoSource::Stabs
+        );
+
+    let outcomes: Vec<delink_macho::emit::CuOutcome>;
+    let mut manifest = serde_json::Map::new();
+
+    if use_debug_info {
+        // DWARF / STABS path — split by the CU index built from debug info.
+        tracing::info!(
+            "splitting {} CUs (from {:?}) in parallel",
+            ctx.cu_index.units.iter().filter(|u| u.functions.iter().any(|f| f.size > 0)).count(),
+            ctx.cu_index.source,
+        );
+
+        // Write a symtab.json derived from the CU index so the user can
+        // inspect (and re-run with --symtab to customise) the grouping.
+        let symtab_for_ref = delink_macho::symtab_json::generate_from_cu_index(&ctx.cu_index);
+        let symtab_out = outdir.join("symtab.json");
+        let symtab_json_str =
+            serde_json::to_string_pretty(&symtab_for_ref).context("serialize symtab")?;
+        std::fs::write(&symtab_out, &symtab_json_str)
+            .with_context(|| format!("write {}", symtab_out.display()))?;
+        tracing::info!("symtab  → {}", symtab_out.display());
+
+        outcomes = delink_macho::emit::split_all_macho(&ctx, outdir, emit_as_elf)?;
+
+        // Build manifest from cu_index (no SymtabInfo available here).
+        for o in &outcomes {
+            let file_name = o
+                .file
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+
+            let functions_json: Vec<_> = ctx
+                .cu_index
+                .units
+                .iter()
+                .find(|u| u.id == o.cu_id)
+                .map(|cu| {
+                    let mut fns: Vec<_> = cu.functions.iter().filter(|f| f.size > 0).collect();
+                    fns.sort_by_key(|f| f.addr);
+                    fns.iter()
+                        .map(|f| {
+                            serde_json::json!({
+                                "name": f.symbol_name(),
+                                "addr": f.addr,
+                                "size": f.size,
+                                "external": f.external,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let emit_json = match &o.result {
+                Ok(s) => serde_json::json!({
+                    "text_bytes": s.text_bytes,
+                    "instructions": s.instructions,
+                    "local_symbols": s.local_symbols,
+                    "undef_symbols": s.undef_symbols,
+                    "relocations": s.relocations,
+                    "unresolved_calls": s.unresolved_calls,
+                }),
+                Err(_) => serde_json::Value::Null,
+            };
+            let error_json = match &o.result {
+                Ok(_) => serde_json::Value::Null,
+                Err(e) => serde_json::Value::String(e.clone()),
+            };
+
+            manifest.insert(
+                file_name,
+                serde_json::json!({
+                    "input_path": input_path.to_string_lossy(),
+                    "output_path": o.file.canonicalize().unwrap_or_else(|_| o.file.clone()).to_string_lossy(),
+                    "arch": arch_str,
+                    "functions": functions_json,
+                    "emit": emit_json,
+                    "error": error_json,
+                }),
+            );
+        }
+    } else {
+        // Symtab-driven path (no debug info, or --symtab override).
+        let symtab: delink_macho::symtab_json::SymtabJson = if let Some(sp) = symtab_arg {
+            let raw = std::fs::read_to_string(sp)
+                .with_context(|| format!("read symtab {}", sp.display()))?;
+            serde_json::from_str(&raw)
+                .with_context(|| format!("parse symtab {}", sp.display()))?
+        } else {
+            delink_macho::symtab_json::generate(&data).context("generate symtab")?
+        };
+
+        let n_syms: usize = symtab.values().map(|v| v.len()).sum();
+        tracing::info!("symtab: {} symbols → {} output files", n_syms, symtab.len());
+
+        let symtab_out = outdir.join("symtab.json");
+        let symtab_json_str =
+            serde_json::to_string_pretty(&symtab).context("serialize symtab")?;
+        std::fs::write(&symtab_out, &symtab_json_str)
+            .with_context(|| format!("write {}", symtab_out.display()))?;
+        tracing::info!("symtab  → {}", symtab_out.display());
+
+        let lookup =
+            delink_macho::symtab_json::build_lookup(&data).context("build symtab lookup")?;
+
+        outcomes =
+            delink_macho::emit::split_by_symtab(&ctx, &symtab, &lookup, outdir, emit_as_elf)?;
+
+        // Build manifest using rich SymtabInfo.
+        for o in &outcomes {
+            let file_name = o
+                .file
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+
+            let empty: Vec<String> = vec![];
+            let names = symtab.get(o.cu_name.as_str()).unwrap_or(&empty);
+            let mut resolved: Vec<_> = names
+                .iter()
+                .filter_map(|name| lookup.get(name.as_str()).map(|info| (name, info)))
+                .collect();
+            resolved.sort_by_key(|(_, info)| info.addr);
+
+            let functions_json: Vec<_> = resolved
+                .iter()
+                .map(|(name, info)| {
+                    serde_json::json!({
+                        "name": name,
+                        "addr": info.addr,
+                        "size": info.size,
+                        "n_type": info.n_type,
+                        "n_sect": info.n_sect,
+                        "n_desc": info.n_desc,
+                        "external": info.external,
+                        "private_external": info.private_external,
+                    })
+                })
+                .collect();
+
+            let emit_json = match &o.result {
+                Ok(s) => serde_json::json!({
+                    "text_bytes": s.text_bytes,
+                    "instructions": s.instructions,
+                    "local_symbols": s.local_symbols,
+                    "undef_symbols": s.undef_symbols,
+                    "relocations": s.relocations,
+                    "unresolved_calls": s.unresolved_calls,
+                }),
+                Err(_) => serde_json::Value::Null,
+            };
+            let error_json = match &o.result {
+                Ok(_) => serde_json::Value::Null,
+                Err(e) => serde_json::Value::String(e.clone()),
+            };
+
+            manifest.insert(
+                file_name,
+                serde_json::json!({
+                    "input_path": input_path.to_string_lossy(),
+                    "output_path": o.file.canonicalize().unwrap_or_else(|_| o.file.clone()).to_string_lossy(),
+                    "arch": arch_str,
+                    "functions": functions_json,
+                    "emit": emit_json,
+                    "error": error_json,
+                }),
+            );
+        }
+    }
 
     // ------------------------------------------------------------------
-    // Build lookup from the binary (addr/size/flags per symbol name)
+    // Shared data
     // ------------------------------------------------------------------
-    let lookup = delink_macho::symtab_json::build_lookup(&data).context("build symtab lookup")?;
-
-    // ------------------------------------------------------------------
-    // Split using symtab grouping
-    // ------------------------------------------------------------------
-    let outcomes = delink_macho::emit::split_by_symtab(&ctx, &symtab, &lookup, outdir, emit_as_elf)?;
-
     let shared = outdir.join("__shared_data.o");
     tracing::info!("emitting shared data → {}", shared.display());
     let shared_stats = if emit_as_elf {
@@ -690,74 +842,7 @@ fn cmd_macho_split(path: &Path, outdir: &Path, symtab_arg: Option<&Path>, emit_a
         delink_macho::emit::emit_macho_shared(&ctx, &shared)?
     };
 
-    // ------------------------------------------------------------------
-    // Build manifest.json
-    // ------------------------------------------------------------------
-
-    let mut manifest = serde_json::Map::new();
-
-    for o in &outcomes {
-        let file_name = o
-            .file
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-
-        let empty: Vec<String> = vec![];
-        let names = symtab.get(o.cu_name.as_str()).unwrap_or(&empty);
-        let mut resolved: Vec<_> = names
-            .iter()
-            .filter_map(|name| lookup.get(name.as_str()).map(|info| (name, info)))
-            .collect();
-        resolved.sort_by_key(|(_, info)| info.addr);
-
-        let functions_json: Vec<_> = resolved
-            .iter()
-            .map(|(name, info)| {
-                serde_json::json!({
-                    "name": name,
-                    "addr": info.addr,
-                    "size": info.size,
-                    "n_type": info.n_type,
-                    "n_sect": info.n_sect,
-                    "n_desc": info.n_desc,
-                    "external": info.external,
-                    "private_external": info.private_external,
-                })
-            })
-            .collect();
-
-        let emit_json = match &o.result {
-            Ok(s) => serde_json::json!({
-                "text_bytes": s.text_bytes,
-                "instructions": s.instructions,
-                "local_symbols": s.local_symbols,
-                "undef_symbols": s.undef_symbols,
-                "relocations": s.relocations,
-                "unresolved_calls": s.unresolved_calls,
-            }),
-            Err(_) => serde_json::Value::Null,
-        };
-        let error_json = match &o.result {
-            Ok(_) => serde_json::Value::Null,
-            Err(e) => serde_json::Value::String(e.clone()),
-        };
-
-        manifest.insert(
-            file_name,
-            serde_json::json!({
-                "input_path": input_path.to_string_lossy(),
-                "output_path": o.file.canonicalize().unwrap_or_else(|_| o.file.clone()).to_string_lossy(),
-                "arch": arch_str,
-                "functions": functions_json,
-                "emit": emit_json,
-                "error": error_json,
-            }),
-        );
-    }
-
-    // Shared data entry.
+    // Shared data manifest entry.
     let shared_vars: Vec<_> = ctx
         .symbols
         .variables

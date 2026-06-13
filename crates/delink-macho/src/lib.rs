@@ -16,7 +16,7 @@ pub mod symbols;
 pub mod symtab_json;
 pub mod symtab_split;
 
-pub use cu::{MachoCompilationUnit, MachoCuIndex, MachoFunction, MachoVariable};
+pub use cu::{DebugInfoSource, MachoCompilationUnit, MachoCuIndex, MachoFunction, MachoVariable};
 pub use emit::{CuOutcome, EmitStats, SharedDataStats};
 pub use symbols::MachoGlobalSymbols;
 

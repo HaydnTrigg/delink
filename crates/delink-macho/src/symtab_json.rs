@@ -60,6 +60,35 @@ pub fn generate(data: &[u8]) -> Result<SymtabJson> {
     Ok(json)
 }
 
+/// Build a `SymtabJson` from a DWARF/STABS `MachoCuIndex`, grouping functions
+/// by their CU.  The output filename matches the stem used by `split_all_macho`.
+pub fn generate_from_cu_index(cu_index: &crate::cu::MachoCuIndex) -> SymtabJson {
+    let mut json: SymtabJson = BTreeMap::new();
+    for cu in &cu_index.units {
+        let stem = {
+            let basename = cu.name.rsplit(['/', '\\']).next().unwrap_or(&cu.name);
+            let stem = match basename.rfind('.') {
+                Some(i) => &basename[..i],
+                None => basename,
+            };
+            stem.chars()
+                .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+                .collect::<String>()
+        };
+        let filename = format!("{:04}_{stem}.o", cu.id);
+        let names: Vec<String> = cu
+            .functions
+            .iter()
+            .filter(|f| f.size > 0)
+            .map(|f| f.symbol_name().to_string())
+            .collect();
+        if !names.is_empty() {
+            json.insert(filename, names);
+        }
+    }
+    json
+}
+
 /// Build a `SymtabLookup` (name → metadata) from the binary's symbol table.
 ///
 /// Includes all N_SECT symbols in `__TEXT,__text` — the same set that

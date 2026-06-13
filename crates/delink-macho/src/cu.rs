@@ -58,8 +58,20 @@ impl MachoCompilationUnit {
     }
 }
 
+/// How the CU index was built — determines which split strategy to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugInfoSource {
+    /// DWARF `__debug_info` section.
+    Dwarf,
+    /// STABS symbols in LC_SYMTAB.
+    Stabs,
+    /// Raw N_SECT symbols only (no debug info present).
+    Symtab,
+}
+
 pub struct MachoCuIndex {
     pub units: Vec<MachoCompilationUnit>,
+    pub source: DebugInfoSource,
 }
 
 pub fn build_cu_index(dwarf: &Dwarf<Slice<'_>>) -> Result<MachoCuIndex> {
@@ -75,7 +87,10 @@ pub fn build_cu_index(dwarf: &Dwarf<Slice<'_>>) -> Result<MachoCuIndex> {
         }
     }
 
-    Ok(MachoCuIndex { units })
+    Ok(MachoCuIndex {
+        units,
+        source: DebugInfoSource::Dwarf,
+    })
 }
 
 fn build_unit(
