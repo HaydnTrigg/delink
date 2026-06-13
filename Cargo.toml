@@ -8,6 +8,7 @@ members = [
     "crates/delink-x86_64",
     "crates/delink-x86",
     "crates/delink-pe",
+    "crates/delink-macho",
     "crates/delink-cli",
 ]
 
@@ -24,7 +25,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 memmap2 = "0.9"
-object = { version = "0.39.1", default-features = false, features = ["read", "write", "elf", "pe", "coff", "std"] }
+object = { version = "0.39.1", default-features = false, features = ["read", "write", "elf", "pe", "coff", "macho", "std"] }
 gimli = { version = "0.33.0", default-features = false, features = ["read", "std"] }
 addr2line = { version = "0.24", default-features = false, features = ["std", "loader"] }
 capstone = "0.14.0"
@@ -41,6 +42,7 @@ delink-emit = { path = "crates/delink-emit" }
 delink-x86_64 = { path = "crates/delink-x86_64" }
 delink-x86 = { path = "crates/delink-x86" }
 delink-pe = { path = "crates/delink-pe" }
+delink-macho = { path = "crates/delink-macho" }
 
 [profile.release-lto]
 inherits = "release"

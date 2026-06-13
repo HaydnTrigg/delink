@@ -103,6 +103,33 @@ enum Cmd {
         #[arg(short, long)]
         outdir: PathBuf,
     },
+
+    // -----------------------------------------------------------------------
+    // Mach-O subcommands
+    // -----------------------------------------------------------------------
+    /// Inspect a Mach-O binary: print sections and DWARF compilation units.
+    MachoInspect {
+        /// Path to the Mach-O executable or dylib.
+        input: PathBuf,
+    },
+
+    /// List Mach-O DWARF compilation units sorted by .text size.
+    MachoListCus {
+        input: PathBuf,
+        #[arg(long, default_value = "")]
+        contains: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+
+    /// Split a Mach-O binary into one `.o` per DWARF CU plus `__shared_data.o`.
+    MachoSplit {
+        /// Path to the Mach-O executable or dylib.
+        input: PathBuf,
+        /// Output directory for the `.o` files.
+        #[arg(short, long)]
+        outdir: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -147,6 +174,13 @@ fn main() -> Result<()> {
             limit,
         } => cmd_pe_list_cus(&input, &pdb, &contains, limit),
         Cmd::PeSplit { input, pdb, outdir } => cmd_pe_split(&input, &pdb, &outdir),
+        Cmd::MachoInspect { input } => cmd_macho_inspect(&input),
+        Cmd::MachoListCus {
+            input,
+            contains,
+            limit,
+        } => cmd_macho_list_cus(&input, &contains, limit),
+        Cmd::MachoSplit { input, outdir } => cmd_macho_split(&input, &outdir),
     }
 }
 
@@ -524,6 +558,111 @@ fn cmd_pe_list_cus(exe_path: &Path, pdb_path: &Path, contains: &str, limit: usiz
     for (bytes, funcs, name) in rows.iter().take(limit) {
         println!("{:>10} {:>6}  {}", bytes, funcs, name);
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Mach-O subcommands
+// ---------------------------------------------------------------------------
+
+fn load_macho_context(path: &Path) -> Result<delink_macho::MachoContext> {
+    let data =
+        std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    tracing::info!("loaded Mach-O ({} bytes)", data.len());
+    delink_macho::load_macho(&data)
+        .with_context(|| format!("load {}", path.display()))
+}
+
+fn cmd_macho_inspect(path: &Path) -> Result<()> {
+    let ctx = load_macho_context(path)?;
+
+    println!("Mach-O  arch={:?}", ctx.arch);
+    println!("\nSECTIONS");
+    println!("  {:<20} {:<12} {:>16} {:>12}  flags", "segment", "name", "addr", "size");
+    for s in &ctx.sections {
+        println!(
+            "  {:<20} {:<12} {:#016x} {:>12}  0x{:08x}",
+            s.segment, s.name, s.addr, s.size, s.flags
+        );
+    }
+
+    println!("\nDWARF compilation units: {}", ctx.cu_index.units.len());
+    let total_funcs: usize = ctx.cu_index.units.iter().map(|u| u.functions.len()).sum();
+    println!("  total functions: {}", total_funcs);
+
+    Ok(())
+}
+
+fn cmd_macho_list_cus(path: &Path, contains: &str, limit: usize) -> Result<()> {
+    let ctx = load_macho_context(path)?;
+
+    let mut rows: Vec<_> = ctx
+        .cu_index
+        .units
+        .iter()
+        .filter(|u| u.name.contains(contains))
+        .map(|u| (u.text_size(), u.functions.len(), u.name.clone()))
+        .collect();
+    rows.sort_by_key(|(b, _, _)| *b);
+
+    println!("{:>10} {:>6}  name", "text bytes", "funcs");
+    for (bytes, funcs, name) in rows.iter().take(limit) {
+        println!("{:>10} {:>6}  {}", bytes, funcs, name);
+    }
+    Ok(())
+}
+
+fn cmd_macho_split(path: &Path, outdir: &Path) -> Result<()> {
+    let ctx = load_macho_context(path)?;
+
+    tracing::info!(
+        "splitting {} CUs (with functions) in parallel",
+        ctx.cu_index
+            .units
+            .iter()
+            .filter(|u| u.functions.iter().any(|f| f.size > 0))
+            .count()
+    );
+
+    let outcomes = delink_macho::emit::split_all_macho(&ctx, outdir)?;
+
+    let shared = outdir.join("__shared_data.o");
+    tracing::info!("emitting shared data → {}", shared.display());
+    let shared_stats = delink_macho::emit::emit_macho_shared(&ctx, &shared)?;
+
+    let mut total = delink_macho::EmitStats::default();
+    let mut failures = 0usize;
+    for o in &outcomes {
+        match &o.result {
+            Ok(s) => {
+                total.text_bytes += s.text_bytes;
+                total.local_symbols += s.local_symbols;
+                total.undef_symbols += s.undef_symbols;
+                total.relocations += s.relocations;
+                total.unresolved_calls += s.unresolved_calls;
+                total.instructions += s.instructions;
+            }
+            Err(e) => {
+                failures += 1;
+                tracing::warn!(cu = %o.cu_name, error = %e, "emit failed");
+            }
+        }
+    }
+
+    println!(
+        "macho-split complete: {} CUs ({} failed)\n  {} bytes .text, {} instructions\n  {} local + {} undef symbols\n  {} relocs ({} unresolved calls)\n  shared: data={} const={} bss={}",
+        outcomes.len().saturating_sub(failures),
+        failures,
+        total.text_bytes,
+        total.instructions,
+        total.local_symbols,
+        total.undef_symbols,
+        total.relocations,
+        total.unresolved_calls,
+        shared_stats.data_bytes,
+        shared_stats.const_bytes,
+        shared_stats.bss_bytes,
+    );
     Ok(())
 }
 

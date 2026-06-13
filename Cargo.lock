@@ -220,6 +220,7 @@ dependencies = [
  "clap",
  "delink-core",
  "delink-emit",
+ "delink-macho",
  "delink-pe",
  "memmap2",
  "object",
@@ -248,6 +249,19 @@ dependencies = [
  "delink-arch",
  "delink-core",
  "memmap2",
+ "object",
+ "rayon",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "delink-macho"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "delink-x86",
+ "gimli",
  "object",
  "rayon",
  "thiserror",
