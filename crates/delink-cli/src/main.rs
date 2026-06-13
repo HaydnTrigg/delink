@@ -636,7 +636,12 @@ fn cmd_macho_list_cus(path: &Path, contains: &str, limit: usize) -> Result<()> {
     Ok(())
 }
 
-fn cmd_macho_split(path: &Path, outdir: &Path, symtab_arg: Option<&Path>, emit_as_elf: bool) -> Result<()> {
+fn cmd_macho_split(
+    path: &Path,
+    outdir: &Path,
+    symtab_arg: Option<&Path>,
+    emit_as_elf: bool,
+) -> Result<()> {
     let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     tracing::info!("loaded Mach-O ({} bytes)", data.len());
 
@@ -667,7 +672,11 @@ fn cmd_macho_split(path: &Path, outdir: &Path, symtab_arg: Option<&Path>, emit_a
         // DWARF / STABS path — split by the CU index built from debug info.
         tracing::info!(
             "splitting {} CUs (from {:?}) in parallel",
-            ctx.cu_index.units.iter().filter(|u| u.functions.iter().any(|f| f.size > 0)).count(),
+            ctx.cu_index
+                .units
+                .iter()
+                .filter(|u| u.functions.iter().any(|f| f.size > 0))
+                .count(),
             ctx.cu_index.source,
         );
 
@@ -746,8 +755,7 @@ fn cmd_macho_split(path: &Path, outdir: &Path, symtab_arg: Option<&Path>, emit_a
         let symtab: delink_macho::symtab_json::SymtabJson = if let Some(sp) = symtab_arg {
             let raw = std::fs::read_to_string(sp)
                 .with_context(|| format!("read symtab {}", sp.display()))?;
-            serde_json::from_str(&raw)
-                .with_context(|| format!("parse symtab {}", sp.display()))?
+            serde_json::from_str(&raw).with_context(|| format!("parse symtab {}", sp.display()))?
         } else {
             delink_macho::symtab_json::generate(&data).context("generate symtab")?
         };
@@ -756,8 +764,7 @@ fn cmd_macho_split(path: &Path, outdir: &Path, symtab_arg: Option<&Path>, emit_a
         tracing::info!("symtab: {} symbols → {} output files", n_syms, symtab.len());
 
         let symtab_out = outdir.join("symtab.json");
-        let symtab_json_str =
-            serde_json::to_string_pretty(&symtab).context("serialize symtab")?;
+        let symtab_json_str = serde_json::to_string_pretty(&symtab).context("serialize symtab")?;
         std::fs::write(&symtab_out, &symtab_json_str)
             .with_context(|| format!("write {}", symtab_out.display()))?;
         tracing::info!("symtab  → {}", symtab_out.display());

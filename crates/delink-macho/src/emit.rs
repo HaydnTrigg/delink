@@ -519,11 +519,7 @@ pub fn emit_elf_shared(ctx: &MachoContext, out_path: &Path) -> Result<SharedData
         .iter()
         .find(|s| s.segment == "__DATA" && s.name == "__bss")
     {
-        let sid = obj.add_section(
-            Vec::new(),
-            b".bss".to_vec(),
-            SectionKind::UninitializedData,
-        );
+        let sid = obj.add_section(Vec::new(), b".bss".to_vec(), SectionKind::UninitializedData);
         obj.section_mut(sid).append_bss(s.size, 16);
         obj.add_symbol(Symbol {
             name: ELF_SYM_BSS_START.to_vec(),
@@ -658,7 +654,11 @@ pub fn split_by_symtab(
 // Parallel split (DWARF/STABS CU-based)
 // ---------------------------------------------------------------------------
 
-pub fn split_all_macho(ctx: &MachoContext, out_dir: &Path, emit_as_elf: bool) -> Result<Vec<CuOutcome>> {
+pub fn split_all_macho(
+    ctx: &MachoContext,
+    out_dir: &Path,
+    emit_as_elf: bool,
+) -> Result<Vec<CuOutcome>> {
     std::fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
 
     let outcomes: Vec<CuOutcome> = ctx

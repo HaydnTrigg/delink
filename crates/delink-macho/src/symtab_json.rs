@@ -72,7 +72,13 @@ pub fn generate_from_cu_index(cu_index: &crate::cu::MachoCuIndex) -> SymtabJson 
                 None => basename,
             };
             stem.chars()
-                .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '_' || c == '-' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
                 .collect::<String>()
         };
         let filename = format!("{:04}_{stem}.o", cu.id);
