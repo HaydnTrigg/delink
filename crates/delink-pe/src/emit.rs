@@ -8,7 +8,7 @@
 //!   I386:  `IMAGE_REL_I386_REL32`  / `IMAGE_REL_I386_DIR32`
 
 use anyhow::{anyhow, Context, Result};
-use object::write::{Object, Relocation, SectionId, Symbol, SymbolId, SymbolSection};
+use object::write::{Mangling, Object, Relocation, SectionId, Symbol, SymbolId, SymbolSection};
 use object::{
     Architecture, BinaryFormat, Endianness, RelocationFlags, SectionKind, SymbolFlags, SymbolKind,
     SymbolScope,
@@ -93,6 +93,12 @@ pub fn emit_pe_cu(pe: &PeContext, cu: &PeCompilationUnit, out_path: &Path) -> Re
         PeArch::X86 => Architecture::I386,
     };
     let mut obj = Object::new(BinaryFormat::Coff, coff_arch, Endianness::Little);
+    // PDB names are already fully decorated (C symbols have their `_` prefix,
+    // C++ names start with `?`).  Disable CoffI386's automatic `_` insertion
+    // so we don't end up with `_?foo@@...` or `___imp_foo`.
+    if matches!(pe.arch, PeArch::X86) {
+        obj.set_mangling(Mangling::Coff);
+    }
     let mut local_syms: HashMap<String, SymbolId> = HashMap::new();
     let mut undef_cache: HashMap<String, SymbolId> = HashMap::new();
     let mut total_text_bytes = 0u64;
@@ -500,6 +506,9 @@ pub fn emit_pe_shared(pe: &PeContext, out_path: &Path) -> Result<SharedDataStats
         PeArch::X86 => Architecture::I386,
     };
     let mut obj = Object::new(BinaryFormat::Coff, coff_arch, Endianness::Little);
+    if matches!(pe.arch, PeArch::X86) {
+        obj.set_mangling(Mangling::Coff);
+    }
     let mut undef_cache: HashMap<String, SymbolId> = HashMap::new();
     let mut stats = SharedDataStats::default();
 
