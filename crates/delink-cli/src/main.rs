@@ -190,9 +190,11 @@ fn main() -> Result<()> {
             contains,
             limit,
         } => cmd_macho_list_cus(&input, &contains, limit),
-        Cmd::MachoSplit { input, outdir, symtab } => {
-            cmd_macho_split(&input, &outdir, symtab.as_deref())
-        }
+        Cmd::MachoSplit {
+            input,
+            outdir,
+            symtab,
+        } => cmd_macho_split(&input, &outdir, symtab.as_deref()),
     }
 }
 
@@ -578,11 +580,9 @@ fn cmd_pe_list_cus(exe_path: &Path, pdb_path: &Path, contains: &str, limit: usiz
 // ---------------------------------------------------------------------------
 
 fn load_macho_context(path: &Path) -> Result<delink_macho::MachoContext> {
-    let data =
-        std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     tracing::info!("loaded Mach-O ({} bytes)", data.len());
-    delink_macho::load_macho(&data)
-        .with_context(|| format!("load {}", path.display()))
+    delink_macho::load_macho(&data).with_context(|| format!("load {}", path.display()))
 }
 
 fn cmd_macho_inspect(path: &Path) -> Result<()> {
@@ -590,7 +590,10 @@ fn cmd_macho_inspect(path: &Path) -> Result<()> {
 
     println!("Mach-O  arch={:?}", ctx.arch);
     println!("\nSECTIONS");
-    println!("  {:<20} {:<12} {:>16} {:>12}  flags", "segment", "name", "addr", "size");
+    println!(
+        "  {:<20} {:<12} {:>16} {:>12}  flags",
+        "segment", "name", "addr", "size"
+    );
     for s in &ctx.sections {
         println!(
             "  {:<20} {:<12} {:#016x} {:>12}  0x{:08x}",
@@ -625,12 +628,11 @@ fn cmd_macho_list_cus(path: &Path, contains: &str, limit: usize) -> Result<()> {
 }
 
 fn cmd_macho_split(path: &Path, outdir: &Path, symtab_arg: Option<&Path>) -> Result<()> {
-    let data =
-        std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     tracing::info!("loaded Mach-O ({} bytes)", data.len());
 
-    let ctx = delink_macho::load_macho(&data)
-        .with_context(|| format!("load {}", path.display()))?;
+    let ctx =
+        delink_macho::load_macho(&data).with_context(|| format!("load {}", path.display()))?;
 
     let input_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let arch_str = format!("{:?}", ctx.arch);
@@ -639,31 +641,24 @@ fn cmd_macho_split(path: &Path, outdir: &Path, symtab_arg: Option<&Path>) -> Res
     // Load or generate the symtab
     // ------------------------------------------------------------------
     let symtab: delink_macho::symtab_json::SymtabJson = if let Some(sp) = symtab_arg {
-        let raw = std::fs::read_to_string(sp)
-            .with_context(|| format!("read symtab {}", sp.display()))?;
-        serde_json::from_str(&raw)
-            .with_context(|| format!("parse symtab {}", sp.display()))?
+        let raw =
+            std::fs::read_to_string(sp).with_context(|| format!("read symtab {}", sp.display()))?;
+        serde_json::from_str(&raw).with_context(|| format!("parse symtab {}", sp.display()))?
     } else {
         delink_macho::symtab_json::generate(&data).context("generate symtab")?
     };
 
     let n_syms: usize = symtab.values().map(|v| v.len()).sum();
-    tracing::info!(
-        "symtab: {} symbols → {} output files",
-        n_syms,
-        symtab.len(),
-    );
+    tracing::info!("symtab: {} symbols → {} output files", n_syms, symtab.len(),);
 
-    std::fs::create_dir_all(outdir)
-        .with_context(|| format!("create {}", outdir.display()))?;
+    std::fs::create_dir_all(outdir).with_context(|| format!("create {}", outdir.display()))?;
 
     // ------------------------------------------------------------------
     // Write symtab.json into the output folder so the user can edit it
     // and re-run with --symtab.
     // ------------------------------------------------------------------
     let symtab_out = outdir.join("symtab.json");
-    let symtab_json_str =
-        serde_json::to_string_pretty(&symtab).context("serialize symtab")?;
+    let symtab_json_str = serde_json::to_string_pretty(&symtab).context("serialize symtab")?;
     std::fs::write(&symtab_out, &symtab_json_str)
         .with_context(|| format!("write {}", symtab_out.display()))?;
     tracing::info!("symtab  → {}", symtab_out.display());
@@ -671,8 +666,7 @@ fn cmd_macho_split(path: &Path, outdir: &Path, symtab_arg: Option<&Path>) -> Res
     // ------------------------------------------------------------------
     // Build lookup from the binary (addr/size/flags per symbol name)
     // ------------------------------------------------------------------
-    let lookup = delink_macho::symtab_json::build_lookup(&data)
-        .context("build symtab lookup")?;
+    let lookup = delink_macho::symtab_json::build_lookup(&data).context("build symtab lookup")?;
 
     // ------------------------------------------------------------------
     // Split using symtab grouping

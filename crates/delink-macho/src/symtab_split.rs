@@ -8,7 +8,7 @@
 use anyhow::Result;
 use object::{Object as _, ObjectSection as _, ObjectSymbol as _, SymbolKind};
 
-use crate::cu::{MachoCompilationUnit, MachoFunction, MachoCuIndex};
+use crate::cu::{MachoCompilationUnit, MachoCuIndex, MachoFunction};
 
 /// Maximum number of functions bundled into one synthetic CU.
 ///
@@ -23,8 +23,7 @@ pub fn build_cu_index_from_symtab(data: &[u8]) -> Result<MachoCuIndex> {
     let text_range = file
         .sections()
         .find(|s| {
-            s.segment_name().ok().flatten() == Some("__TEXT")
-                && s.name().ok() == Some("__text")
+            s.segment_name().ok().flatten() == Some("__TEXT") && s.name().ok() == Some("__text")
         })
         .map(|s| s.address()..s.address() + s.size());
 

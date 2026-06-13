@@ -1,6 +1,6 @@
 //! Global symbol resolver for Mach-O / x86 relocation recovery.
 
-use crate::cu::{MachoFunction, MachoCuIndex, MachoVariable};
+use crate::cu::{MachoCuIndex, MachoFunction, MachoVariable};
 use crate::MachoSection;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;

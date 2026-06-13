@@ -102,10 +102,8 @@ pub fn emit_macho_cu(
         // For other architectures (PPC etc.) we emit raw bytes without synthetic
         // relocations — the bytes are correct but non-relocatable.
         let relocs_to_emit: Vec<delink_x86::recover::RecoveredReloc> = if recover_x86 {
-            let recovery =
-                delink_x86::recover(&fn_bytes, f.addr, f.size, &ctx.symbols).with_context(
-                    || format!("recover relocs for '{}' at {:#x}", f.name, f.addr),
-                )?;
+            let recovery = delink_x86::recover(&fn_bytes, f.addr, f.size, &ctx.symbols)
+                .with_context(|| format!("recover relocs for '{}' at {:#x}", f.name, f.addr))?;
             stats.instructions += recovery.diag.instructions;
             stats.unresolved_calls += recovery.diag.calls_unresolved;
             // Zero the rel32 displacement fields before appending.
@@ -142,11 +140,7 @@ pub fn emit_macho_cu(
         local_syms.insert(f.symbol_name().to_string(), sym_id);
 
         // Emit variable labels that fall inside this function.
-        for (var_va, var) in ctx
-            .symbols
-            .variables
-            .range(f.addr..f.addr + f.size)
-        {
+        for (var_va, var) in ctx.symbols.variables.range(f.addr..f.addr + f.size) {
             if *var_va == f.addr {
                 continue;
             }
@@ -187,13 +181,7 @@ pub fn emit_macho_cu(
                     },
                 },
             )
-            .with_context(|| {
-                format!(
-                    "add reloc at {:#x} → '{}'",
-                    f.addr + r.offset,
-                    r.target
-                )
-            })?;
+            .with_context(|| format!("add reloc at {:#x} → '{}'", f.addr + r.offset, r.target))?;
             stats.relocations += 1;
         }
     }
@@ -336,8 +324,7 @@ pub fn split_by_symtab(
 ) -> Result<Vec<CuOutcome>> {
     use crate::cu::{MachoCompilationUnit, MachoFunction};
 
-    std::fs::create_dir_all(out_dir)
-        .with_context(|| format!("create {}", out_dir.display()))?;
+    std::fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
 
     let group_vec: Vec<(&String, &Vec<String>)> = symtab.iter().collect();
 
@@ -348,9 +335,9 @@ pub fn split_by_symtab(
             let mut resolved: Vec<(String, u64, u64, bool)> = names
                 .iter()
                 .filter_map(|name| {
-                    lookup.get(name.as_str()).map(|info| {
-                        (name.clone(), info.addr, info.size, info.external)
-                    })
+                    lookup
+                        .get(name.as_str())
+                        .map(|info| (name.clone(), info.addr, info.size, info.external))
                 })
                 .collect();
             resolved.sort_by_key(|(_, addr, _, _)| *addr);
@@ -405,8 +392,7 @@ pub fn split_by_symtab(
 // ---------------------------------------------------------------------------
 
 pub fn split_all_macho(ctx: &MachoContext, out_dir: &Path) -> Result<Vec<CuOutcome>> {
-    std::fs::create_dir_all(out_dir)
-        .with_context(|| format!("create {}", out_dir.display()))?;
+    std::fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
 
     let outcomes: Vec<CuOutcome> = ctx
         .cu_index
@@ -482,7 +468,13 @@ fn sanitize_file_stem(name: &str) -> String {
     };
     // Replace characters that are invalid in filenames.
     stem.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 

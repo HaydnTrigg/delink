@@ -98,32 +98,59 @@ struct ParsedSym {
 
 fn parse_text_symbols(data: &[u8]) -> Vec<ParsedSym> {
     let le = detect_little_endian(data);
-    let Some(Symtab { sym_data, str_data, text_sect_indices }) = parse_symtab_raw(data, le) else {
+    let Some(Symtab {
+        sym_data,
+        str_data,
+        text_sect_indices,
+    }) = parse_symtab_raw(data, le)
+    else {
         return Vec::new();
     };
 
     let read_str = |strx: u32| -> String {
         let strx = strx as usize;
-        if strx >= str_data.len() { return String::new(); }
+        if strx >= str_data.len() {
+            return String::new();
+        }
         let end = str_data[strx..].iter().position(|&b| b == 0).unwrap_or(0);
         String::from_utf8_lossy(&str_data[strx..strx + end]).into_owned()
     };
 
-    struct Raw { name: String, addr: u64, n_type: u8, n_sect: u8, n_desc: u16 }
+    struct Raw {
+        name: String,
+        addr: u64,
+        n_type: u8,
+        n_sect: u8,
+        n_desc: u16,
+    }
     let mut raw: Vec<Raw> = Vec::new();
 
     for chunk in sym_data.chunks_exact(12) {
         let n_type = chunk[4];
         let n_sect = chunk[5];
-        if n_type & N_STAB_MASK != 0 { continue; }
-        if n_type & N_TYPE_MASK != N_SECT_VAL { continue; }
-        if !text_sect_indices.contains(&n_sect) { continue; }
+        if n_type & N_STAB_MASK != 0 {
+            continue;
+        }
+        if n_type & N_TYPE_MASK != N_SECT_VAL {
+            continue;
+        }
+        if !text_sect_indices.contains(&n_sect) {
+            continue;
+        }
         let strx = r32_chunk(chunk, 0, le);
         let n_desc = r16_chunk(chunk, 6, le);
         let addr = r32_chunk(chunk, 8, le) as u64;
         let name = read_str(strx);
-        if name.is_empty() { continue; }
-        raw.push(Raw { name, addr, n_type, n_sect, n_desc });
+        if name.is_empty() {
+            continue;
+        }
+        raw.push(Raw {
+            name,
+            addr,
+            n_type,
+            n_sect,
+            n_desc,
+        });
     }
 
     raw.sort_by_key(|s| (s.addr, s.name.clone()));
@@ -156,11 +183,17 @@ struct Symtab<'a> {
 }
 
 fn parse_symtab_raw(data: &[u8], le: bool) -> Option<Symtab<'_>> {
-    if data.len() < 28 { return None; }
+    if data.len() < 28 {
+        return None;
+    }
 
     let r32 = |off: usize| -> Option<u32> {
         let b: [u8; 4] = data.get(off..off + 4)?.try_into().ok()?;
-        Some(if le { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) })
+        Some(if le {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        })
     };
 
     let ncmds = r32(16)? as usize;
@@ -178,7 +211,9 @@ fn parse_symtab_raw(data: &[u8], le: bool) -> Option<Symtab<'_>> {
     while pos + 8 <= cmds_end && count < ncmds {
         let cmd = r32(pos)?;
         let cmdsize = r32(pos + 4)? as usize;
-        if cmdsize == 0 { break; }
+        if cmdsize == 0 {
+            break;
+        }
 
         match cmd {
             LC_SYMTAB if cmdsize >= 24 => {
@@ -190,7 +225,9 @@ fn parse_symtab_raw(data: &[u8], le: bool) -> Option<Symtab<'_>> {
                 let nsects = r32(pos + 48)? as usize;
                 for i in 0..nsects {
                     let sb = pos + SEGMENT_CMD32_SIZE + i * SECTION32_SIZE;
-                    if sb + SECTION32_SIZE > cmds_end { break; }
+                    if sb + SECTION32_SIZE > cmds_end {
+                        break;
+                    }
                     let sec_name = cstr(&data[sb..sb + 16]);
                     let seg_name = cstr(&data[sb + 16..sb + 32]);
                     if seg_name == "__TEXT" && sec_name == "__text" {
@@ -205,30 +242,52 @@ fn parse_symtab_raw(data: &[u8], le: bool) -> Option<Symtab<'_>> {
         count += 1;
     }
 
-    if nsyms == 0 { return None; }
+    if nsyms == 0 {
+        return None;
+    }
     let sym_start = symtab_off as usize;
     let sym_end = sym_start.checked_add(nsyms as usize * 12)?;
-    if sym_end > data.len() { return None; }
+    if sym_end > data.len() {
+        return None;
+    }
     let str_start = stroff as usize;
-    let str_data = if str_start < data.len() { &data[str_start..] } else { &[] };
+    let str_data = if str_start < data.len() {
+        &data[str_start..]
+    } else {
+        &[]
+    };
 
-    Some(Symtab { sym_data: &data[sym_start..sym_end], str_data, text_sect_indices })
+    Some(Symtab {
+        sym_data: &data[sym_start..sym_end],
+        str_data,
+        text_sect_indices,
+    })
 }
 
 pub fn detect_little_endian(data: &[u8]) -> bool {
-    if data.len() < 4 { return true; }
+    if data.len() < 4 {
+        return true;
+    }
     let magic = u32::from_le_bytes(data[..4].try_into().unwrap());
     matches!(magic, 0xFEED_FACE | 0xFEED_FACF)
 }
 
 fn r32_chunk(chunk: &[u8], off: usize, le: bool) -> u32 {
     let b: [u8; 4] = chunk[off..off + 4].try_into().unwrap();
-    if le { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) }
+    if le {
+        u32::from_le_bytes(b)
+    } else {
+        u32::from_be_bytes(b)
+    }
 }
 
 fn r16_chunk(chunk: &[u8], off: usize, le: bool) -> u16 {
     let b: [u8; 2] = chunk[off..off + 2].try_into().unwrap();
-    if le { u16::from_le_bytes(b) } else { u16::from_be_bytes(b) }
+    if le {
+        u16::from_le_bytes(b)
+    } else {
+        u16::from_be_bytes(b)
+    }
 }
 
 fn cstr(bytes: &[u8]) -> String {
@@ -249,8 +308,12 @@ fn decode_n_type(n_type: u8) -> String {
         other => return format!("0x{other:02x}"),
     };
     let mut s = base.to_string();
-    if n_type & N_PEXT != 0 { s.push_str("|N_PEXT"); }
-    if n_type & N_EXT  != 0 { s.push_str("|N_EXT");  }
+    if n_type & N_PEXT != 0 {
+        s.push_str("|N_PEXT");
+    }
+    if n_type & N_EXT != 0 {
+        s.push_str("|N_EXT");
+    }
     s
 }
 
@@ -265,24 +328,52 @@ fn decode_n_desc(n_desc: u16) -> Vec<String> {
         5 => flags.push("REF_PRIVATE_UNDEF_LAZY".into()),
         n => flags.push(format!("REF(0x{n:x})")),
     }
-    if n_desc & 0x0010 != 0 { flags.push("REFERENCED_DYNAMICALLY".into()); }
-    if n_desc & 0x0020 != 0 { flags.push("N_NO_DEAD_STRIP".into()); }
-    if n_desc & 0x0040 != 0 { flags.push("N_DESC_DISCARDED".into()); }
-    if n_desc & 0x0080 != 0 { flags.push("N_WEAK_REF".into()); }
-    if n_desc & 0x0100 != 0 { flags.push("N_WEAK_DEF".into()); }
-    if n_desc & 0x0200 != 0 { flags.push("N_REF_TO_WEAK".into()); }
-    if n_desc & 0x0800 != 0 { flags.push("N_ARM_THUMB_DEF".into()); }
-    if n_desc & 0x1000 != 0 { flags.push("N_SYMBOL_RESOLVER".into()); }
-    if n_desc & 0x2000 != 0 { flags.push("N_ALT_ENTRY".into()); }
+    if n_desc & 0x0010 != 0 {
+        flags.push("REFERENCED_DYNAMICALLY".into());
+    }
+    if n_desc & 0x0020 != 0 {
+        flags.push("N_NO_DEAD_STRIP".into());
+    }
+    if n_desc & 0x0040 != 0 {
+        flags.push("N_DESC_DISCARDED".into());
+    }
+    if n_desc & 0x0080 != 0 {
+        flags.push("N_WEAK_REF".into());
+    }
+    if n_desc & 0x0100 != 0 {
+        flags.push("N_WEAK_DEF".into());
+    }
+    if n_desc & 0x0200 != 0 {
+        flags.push("N_REF_TO_WEAK".into());
+    }
+    if n_desc & 0x0800 != 0 {
+        flags.push("N_ARM_THUMB_DEF".into());
+    }
+    if n_desc & 0x1000 != 0 {
+        flags.push("N_SYMBOL_RESOLVER".into());
+    }
+    if n_desc & 0x2000 != 0 {
+        flags.push("N_ALT_ENTRY".into());
+    }
     flags
 }
 
 fn sanitize_filename(name: &str) -> String {
     let s: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || matches!(c, '_' | '-' | '.') { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '_' | '-' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let trimmed = s.trim_start_matches(|c: char| c == '.' || c == '_');
     let truncated = &trimmed[..trimmed.len().min(200)];
-    if truncated.is_empty() { "unknown".to_string() } else { truncated.to_string() }
+    if truncated.is_empty() {
+        "unknown".to_string()
+    } else {
+        truncated.to_string()
+    }
 }

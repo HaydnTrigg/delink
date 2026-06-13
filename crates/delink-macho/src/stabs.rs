@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 
-use crate::cu::{MachoCompilationUnit, MachoFunction, MachoCuIndex, MachoVariable};
+use crate::cu::{MachoCompilationUnit, MachoCuIndex, MachoFunction, MachoVariable};
 
 // STABS n_type codes (even values ≥ 0x20 are STABS; odd = regular sym flags).
 const N_GSYM: u8 = 0x20; // global data symbol (value=0; addr in symtab)
@@ -37,10 +37,7 @@ pub fn build_cu_index_from_stabs(data: &[u8], little_endian: bool) -> Result<Mac
         if strx >= str_data.len() {
             return String::new();
         }
-        let end = str_data[strx..]
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(0);
+        let end = str_data[strx..].iter().position(|&b| b == 0).unwrap_or(0);
         String::from_utf8_lossy(&str_data[strx..strx + end]).into_owned()
     };
 
@@ -76,7 +73,11 @@ pub fn build_cu_index_from_stabs(data: &[u8], little_endian: bool) -> Result<Mac
         let oso_path = if i < syms.len() && syms[i].ntype == N_OSO {
             let s = read_str(syms[i].strx);
             i += 1;
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         } else {
             None
         };
@@ -172,7 +173,11 @@ fn find_symtab(data: &[u8], le: bool) -> Option<(Vec<Nl>, &[u8])> {
 
     let r32 = |off: usize| -> Option<u32> {
         let b: [u8; 4] = data.get(off..off + 4)?.try_into().ok()?;
-        Some(if le { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) })
+        Some(if le {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        })
     };
 
     let ncmds = r32(16)? as usize;
@@ -220,7 +225,11 @@ fn find_symtab(data: &[u8], le: bool) -> Option<(Vec<Nl>, &[u8])> {
 
     let r32_chunk = |chunk: &[u8], off: usize| -> u32 {
         let b: [u8; 4] = chunk[off..off + 4].try_into().unwrap();
-        if le { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) }
+        if le {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        }
     };
 
     let mut syms = Vec::with_capacity(nsyms as usize);
@@ -228,7 +237,11 @@ fn find_symtab(data: &[u8], le: bool) -> Option<(Vec<Nl>, &[u8])> {
         let ntype = chunk[4];
         // Only keep STABS entries (even values ≥ 0x20, no N_EXT / N_PEXT bits).
         if ntype < 0x20 || ntype & 1 != 0 {
-            syms.push(Nl { strx: 0, ntype, value: 0 });
+            syms.push(Nl {
+                strx: 0,
+                ntype,
+                value: 0,
+            });
             continue;
         }
         syms.push(Nl {

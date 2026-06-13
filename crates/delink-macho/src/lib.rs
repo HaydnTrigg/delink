@@ -12,9 +12,9 @@ use std::collections::HashMap;
 pub mod cu;
 pub mod emit;
 pub mod stabs;
+pub mod symbols;
 pub mod symtab_json;
 pub mod symtab_split;
-pub mod symbols;
 
 pub use cu::{MachoCompilationUnit, MachoCuIndex, MachoFunction, MachoVariable};
 pub use emit::{CuOutcome, EmitStats, SharedDataStats};
@@ -99,12 +99,7 @@ pub fn load_macho(data: &[u8]) -> Result<MachoContext> {
         object::Architecture::X86_64 => MachoArch::X86_64,
         object::Architecture::PowerPc => MachoArch::PPC,
         object::Architecture::PowerPc64 => MachoArch::PPC64,
-        other => {
-            return Err(anyhow!(
-                "unsupported Mach-O architecture: {:?}",
-                other
-            ))
-        }
+        other => return Err(anyhow!("unsupported Mach-O architecture: {:?}", other)),
     };
 
     let little_endian = file.is_little_endian();
@@ -182,17 +177,16 @@ fn parse_sections(file: &object::File<'_>) -> Result<Vec<MachoSection>> {
 // ---------------------------------------------------------------------------
 
 fn load_dwarf<'a>(_data: &'a [u8], file: &object::File<'a>) -> Result<Dwarf<'a>> {
-    let load_section =
-        |id: gimli::SectionId| -> std::result::Result<DwarfSlice<'a>, gimli::Error> {
-            // Map ELF-style ".debug_info" → Mach-O "__debug_info"
-            let elf_name = id.name();
-            let macho_name = format!("__{}", &elf_name[1..]);
-            let section_data: &'a [u8] = match file.section_by_name(&macho_name) {
-                Some(s) => s.data().unwrap_or(b""),
-                None => b"",
-            };
-            Ok(EndianSlice::new(section_data, LittleEndian))
+    let load_section = |id: gimli::SectionId| -> std::result::Result<DwarfSlice<'a>, gimli::Error> {
+        // Map ELF-style ".debug_info" → Mach-O "__debug_info"
+        let elf_name = id.name();
+        let macho_name = format!("__{}", &elf_name[1..]);
+        let section_data: &'a [u8] = match file.section_by_name(&macho_name) {
+            Some(s) => s.data().unwrap_or(b""),
+            None => b"",
         };
+        Ok(EndianSlice::new(section_data, LittleEndian))
+    };
     gimli::Dwarf::load(load_section).map_err(|e| anyhow!("load DWARF: {e}"))
 }
 
@@ -336,10 +330,7 @@ fn parse_stubs_32(data: &[u8]) -> Result<HashMap<u64, String>> {
         if n_strx >= str_data.len() {
             return None;
         }
-        let end = str_data[n_strx..]
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(0);
+        let end = str_data[n_strx..].iter().position(|&b| b == 0).unwrap_or(0);
         let s = String::from_utf8_lossy(&str_data[n_strx..n_strx + end]).into_owned();
         if s.is_empty() {
             None

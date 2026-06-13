@@ -68,9 +68,7 @@ pub fn build_cu_index(dwarf: &Dwarf<Slice<'_>>) -> Result<MachoCuIndex> {
     let mut headers = dwarf.units();
 
     while let Some(header) = headers.next().map_err(|e| anyhow!("DWARF units: {e}"))? {
-        let unit = dwarf
-            .unit(header)
-            .map_err(|e| anyhow!("DWARF unit: {e}"))?;
+        let unit = dwarf.unit(header).map_err(|e| anyhow!("DWARF unit: {e}"))?;
         if let Some(cu) = build_unit(dwarf, &unit, cu_id)? {
             units.push(cu);
             cu_id += 1;
@@ -86,10 +84,7 @@ fn build_unit(
     id: usize,
 ) -> Result<Option<MachoCompilationUnit>> {
     let mut entries = unit.entries();
-    let Some(root) = entries
-        .next_dfs()
-        .map_err(|e| anyhow!("DIE tree: {e}"))?
-    else {
+    let Some(root) = entries.next_dfs().map_err(|e| anyhow!("DIE tree: {e}"))? else {
         return Ok(None);
     };
     if root.tag() != gimli::DW_TAG_compile_unit {
@@ -104,10 +99,7 @@ fn build_unit(
     let mut range_iter = dwarf
         .unit_ranges(unit)
         .map_err(|e| anyhow!("unit ranges: {e}"))?;
-    while let Some(r) = range_iter
-        .next()
-        .map_err(|e| anyhow!("range entry: {e}"))?
-    {
+    while let Some(r) = range_iter.next().map_err(|e| anyhow!("range entry: {e}"))? {
         if r.begin < r.end {
             ranges.push(r.begin..r.end);
         }
@@ -117,10 +109,7 @@ fn build_unit(
     let mut variables = Vec::new();
 
     let mut entries = unit.entries();
-    while let Some(entry) = entries
-        .next_dfs()
-        .map_err(|e| anyhow!("DIE entry: {e}"))?
-    {
+    while let Some(entry) = entries.next_dfs().map_err(|e| anyhow!("DIE entry: {e}"))? {
         match entry.tag() {
             gimli::DW_TAG_subprogram => {
                 if let Some(f) = extract_function(dwarf, unit, entry)? {
@@ -198,8 +187,12 @@ fn extract_variable(
     };
     let name =
         attr_string(dwarf, unit, entry, gimli::DW_AT_name)?.unwrap_or_else(|| "<anon>".into());
-    let linkage_name = attr_string(dwarf, unit, entry, gimli::DW_AT_linkage_name)?
-        .or(attr_string(dwarf, unit, entry, gimli::DW_AT_MIPS_linkage_name)?);
+    let linkage_name = attr_string(dwarf, unit, entry, gimli::DW_AT_linkage_name)?.or(attr_string(
+        dwarf,
+        unit,
+        entry,
+        gimli::DW_AT_MIPS_linkage_name,
+    )?);
     let external = matches!(
         entry.attr_value(gimli::DW_AT_external),
         Some(AttributeValue::Flag(true))
@@ -227,9 +220,9 @@ fn variable_address(
     let mut ops = expr.operations(unit.encoding());
     match ops.next().map_err(|e| anyhow!("DWARF op: {e}"))? {
         Some(gimli::Operation::Address { address }) => Ok(Some(address)),
-        Some(gimli::Operation::AddressIndex { index }) => {
-            Ok(Some(dwarf.address(unit, index).map_err(|e| anyhow!("{e}"))?))
-        }
+        Some(gimli::Operation::AddressIndex { index }) => Ok(Some(
+            dwarf.address(unit, index).map_err(|e| anyhow!("{e}"))?,
+        )),
         _ => Ok(None),
     }
 }
@@ -241,9 +234,12 @@ fn resolve_names(
     entry: &DebuggingInformationEntry<Slice<'_>>,
 ) -> Result<(Option<String>, Option<String>, bool)> {
     let mut name = attr_string(dwarf, unit, entry, gimli::DW_AT_name)?;
-    let mut linkage = attr_string(dwarf, unit, entry, gimli::DW_AT_linkage_name)?.or(
-        attr_string(dwarf, unit, entry, gimli::DW_AT_MIPS_linkage_name)?,
-    );
+    let mut linkage = attr_string(dwarf, unit, entry, gimli::DW_AT_linkage_name)?.or(attr_string(
+        dwarf,
+        unit,
+        entry,
+        gimli::DW_AT_MIPS_linkage_name,
+    )?);
     let mut external = matches!(
         entry.attr_value(gimli::DW_AT_external),
         Some(AttributeValue::Flag(true))
@@ -302,9 +298,7 @@ fn attr_string(
         return Ok(None);
     };
     let val = attr.value();
-    let s = dwarf
-        .attr_string(unit, val)
-        .map_err(|e| anyhow!("{e}"))?;
+    let s = dwarf.attr_string(unit, val).map_err(|e| anyhow!("{e}"))?;
     Ok(Some(s.to_string_lossy().into_owned()))
 }
 
