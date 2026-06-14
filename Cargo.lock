@@ -190,7 +190,7 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
 name = "delink-aarch64"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "capstone",
@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "delink-arch"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "delink-core",
@@ -214,7 +214,7 @@ dependencies = [
 
 [[package]]
 name = "delink-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "delink-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "gimli",
@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "delink-emit"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "delink-aarch64",
@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "delink-macho"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "delink-x86",
@@ -272,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "delink-pe"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "delink-x86",
@@ -286,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "delink-x86"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "iced-x86",
@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "delink-x86_64"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "iced-x86",
