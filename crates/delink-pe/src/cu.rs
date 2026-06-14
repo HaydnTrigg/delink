@@ -193,22 +193,17 @@ pub fn build_cu_index(
                             continue;
                         }
                         let va = image_base + rva.0 as u64;
-                        let name = mangled_by_va
-                            .get(&va)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                let raw = p.name.to_string().into_owned();
-                                // For x86 __stdcall, restore the _name@N decoration that the
-                                // public symbols stream would normally carry but may be absent
-                                // for local (static) functions.
-                                if let Some(&param_bytes) =
-                                    stdcall_param_bytes.get(&p.type_index)
-                                {
-                                    format!("_{raw}@{param_bytes}")
-                                } else {
-                                    raw
-                                }
-                            });
+                        let name = mangled_by_va.get(&va).cloned().unwrap_or_else(|| {
+                            let raw = p.name.to_string().into_owned();
+                            // For x86 __stdcall, restore the _name@N decoration that the
+                            // public symbols stream would normally carry but may be absent
+                            // for local (static) functions.
+                            if let Some(&param_bytes) = stdcall_param_bytes.get(&p.type_index) {
+                                format!("_{raw}@{param_bytes}")
+                            } else {
+                                raw
+                            }
+                        });
                         let f = PeFunction {
                             name,
                             va,
@@ -227,12 +222,9 @@ pub fn build_cu_index(
                             continue;
                         }
                         let va = image_base + rva.0 as u64;
-                        let name = mangled_by_va
-                            .get(&va)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                x86_c_data_name(d.name.to_string().into_owned(), arch)
-                            });
+                        let name = mangled_by_va.get(&va).cloned().unwrap_or_else(|| {
+                            x86_c_data_name(d.name.to_string().into_owned(), arch)
+                        });
                         let v = PeVariable {
                             name,
                             va,
@@ -248,12 +240,9 @@ pub fn build_cu_index(
                             continue;
                         }
                         let va = image_base + rva.0 as u64;
-                        let name = mangled_by_va
-                            .get(&va)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                x86_c_data_name(l.name.to_string().into_owned(), arch)
-                            });
+                        let name = mangled_by_va.get(&va).cloned().unwrap_or_else(|| {
+                            x86_c_data_name(l.name.to_string().into_owned(), arch)
+                        });
                         all_variables.entry(va).or_insert_with(|| PeVariable {
                             name,
                             va,
@@ -367,9 +356,7 @@ fn x86_type_stack_bytes(type_finder: &pdb::TypeFinder<'_>, type_idx: pdb::TypeIn
         Ok(pdb::TypeData::Class(c)) => align4(c.size as u32),
         Ok(pdb::TypeData::Union(u)) => align4(u.size as u32),
         Ok(pdb::TypeData::Modifier(m)) => x86_type_stack_bytes(type_finder, m.underlying_type),
-        Ok(pdb::TypeData::Enumeration(e)) => {
-            x86_type_stack_bytes(type_finder, e.underlying_type)
-        }
+        Ok(pdb::TypeData::Enumeration(e)) => x86_type_stack_bytes(type_finder, e.underlying_type),
         Ok(pdb::TypeData::Bitfield(b)) => x86_type_stack_bytes(type_finder, b.underlying_type),
         _ => 4,
     }
