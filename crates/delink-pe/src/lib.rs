@@ -120,7 +120,7 @@ pub fn load_pe_and_pdb(exe_data: &[u8], pdb_data: &[u8]) -> Result<PeContext> {
     let imports = parse_imports(exe_data, &sections, image_base, arch);
 
     let (cu_index, all_functions, all_variables) =
-        cu::build_cu_index(pdb_data, image_base, &sections)?;
+        cu::build_cu_index(pdb_data, image_base, &sections, arch)?;
     let symbols = symbols::PeGlobalSymbols::build(
         all_functions,
         all_variables,

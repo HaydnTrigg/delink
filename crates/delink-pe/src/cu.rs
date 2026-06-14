@@ -7,7 +7,10 @@ use anyhow::{Context, Result};
 use pdb::FallibleIterator;
 use std::collections::{BTreeMap, HashMap};
 
-use crate::PeSection;
+use crate::{PeArch, PeSection};
+
+// CV calling convention code for __stdcall (near standard call, callee cleans stack).
+const CV_CALL_NEAR_STD: u8 = 0x07;
 
 #[derive(Debug, Clone)]
 pub struct PeFunction {
@@ -90,9 +93,34 @@ pub fn build_cu_index(
     pdb_data: &[u8],
     image_base: u64,
     sections: &[PeSection],
+    arch: PeArch,
 ) -> Result<CuIndexResult> {
     let cursor = std::io::Cursor::new(pdb_data);
     let mut pdb = pdb::PDB::open(cursor).context("open PDB")?;
+
+    // For x86 32-bit binaries, local (static) functions with __stdcall calling
+    // convention may not appear in the public symbols stream with their decorated
+    // name (_funcname@N).  Pre-compute a map from procedure TypeIndex to the
+    // total bytes of parameters so we can reconstruct the mangled name later.
+    let stdcall_param_bytes: HashMap<pdb::TypeIndex, u32> = {
+        let mut map = HashMap::new();
+        if matches!(arch, PeArch::X86) {
+            if let Ok(type_information) = pdb.type_information() {
+                let mut type_finder = type_information.finder();
+                let mut iter = type_information.iter();
+                while let Ok(Some(typ)) = iter.next() {
+                    type_finder.update(&iter);
+                    if let Ok(pdb::TypeData::Procedure(proc)) = typ.parse() {
+                        if proc.attributes.calling_convention() == CV_CALL_NEAR_STD {
+                            let bytes = x86_proc_param_bytes(&type_finder, proc.argument_list);
+                            map.insert(typ.index(), bytes);
+                        }
+                    }
+                }
+            }
+        }
+        map
+    };
 
     let dbi = pdb.debug_information().context("PDB debug information")?;
     let address_map = pdb.address_map().context("PDB address map")?;
@@ -168,7 +196,19 @@ pub fn build_cu_index(
                         let name = mangled_by_va
                             .get(&va)
                             .cloned()
-                            .unwrap_or_else(|| p.name.to_string().into_owned());
+                            .unwrap_or_else(|| {
+                                let raw = p.name.to_string().into_owned();
+                                // For x86 __stdcall, restore the _name@N decoration that the
+                                // public symbols stream would normally carry but may be absent
+                                // for local (static) functions.
+                                if let Some(&param_bytes) =
+                                    stdcall_param_bytes.get(&p.type_index)
+                                {
+                                    format!("_{raw}@{param_bytes}")
+                                } else {
+                                    raw
+                                }
+                            });
                         let f = PeFunction {
                             name,
                             va,
@@ -275,4 +315,77 @@ fn section_name_for_va(sections: &[PeSection], va: u64) -> String {
         .find(|s| s.contains_va(va))
         .map(|s| s.name.clone())
         .unwrap_or_else(|| "?".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// x86 __stdcall parameter-size helpers
+// ---------------------------------------------------------------------------
+
+/// Sum the stack bytes consumed by every parameter in `arg_list` on x86.
+fn x86_proc_param_bytes(type_finder: &pdb::TypeFinder<'_>, arg_list: pdb::TypeIndex) -> u32 {
+    let Ok(type_ref) = type_finder.find(arg_list) else {
+        return 0;
+    };
+    let Ok(pdb::TypeData::ArgumentList(args)) = type_ref.parse() else {
+        return 0;
+    };
+    args.arguments
+        .iter()
+        .map(|&idx| x86_type_stack_bytes(type_finder, idx))
+        .sum()
+}
+
+/// Bytes a single parameter type occupies on the x86 stack (minimum 4, aligned to 4).
+fn x86_type_stack_bytes(type_finder: &pdb::TypeFinder<'_>, type_idx: pdb::TypeIndex) -> u32 {
+    let Ok(type_ref) = type_finder.find(type_idx) else {
+        return 4;
+    };
+    match type_ref.parse() {
+        Ok(pdb::TypeData::Primitive(p)) => {
+            if p.indirection.is_some() {
+                4 // x86 pointer = 4 bytes
+            } else {
+                x86_primitive_stack_bytes(p.kind)
+            }
+        }
+        Ok(pdb::TypeData::Pointer(_)) => 4,
+        Ok(pdb::TypeData::Class(c)) => align4(c.size as u32),
+        Ok(pdb::TypeData::Union(u)) => align4(u.size as u32),
+        Ok(pdb::TypeData::Modifier(m)) => x86_type_stack_bytes(type_finder, m.underlying_type),
+        Ok(pdb::TypeData::Enumeration(e)) => {
+            x86_type_stack_bytes(type_finder, e.underlying_type)
+        }
+        Ok(pdb::TypeData::Bitfield(b)) => x86_type_stack_bytes(type_finder, b.underlying_type),
+        _ => 4,
+    }
+}
+
+fn align4(n: u32) -> u32 {
+    (n + 3) & !3
+}
+
+fn x86_primitive_stack_bytes(kind: pdb::PrimitiveKind) -> u32 {
+    use pdb::PrimitiveKind::*;
+    match kind {
+        NoType | Void => 0,
+        // 8-bit and 16-bit types are sign/zero-extended and pushed as DWORDs.
+        I8 | U8 | Char | UChar | RChar | Bool8 => 4,
+        I16 | U16 | Short | UShort | WChar | RChar16 | Bool16 | F16 => 4,
+        // 32-bit types.
+        I32 | U32 | Long | ULong | RChar32 | F32 | F32PP | Bool32 | HRESULT => 4,
+        // 64-bit types.
+        I64 | U64 | Quad | UQuad | F64 | Bool64 => 8,
+        // 80-bit float (10 bytes on x87), padded to next DWORD = 12.
+        F80 => 12,
+        // 48-bit float (6 bytes, Turbo Pascal), padded to 8.
+        F48 => 8,
+        // 128-bit types.
+        I128 | U128 | Octa | UOcta | F128 => 16,
+        // Complex types: 2 × their component width.
+        Complex32 => 4,
+        Complex64 => 8,
+        Complex80 => 12,
+        Complex128 => 16,
+        _ => 4,
+    }
 }
