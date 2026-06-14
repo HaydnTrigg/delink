@@ -230,7 +230,9 @@ pub fn build_cu_index(
                         let name = mangled_by_va
                             .get(&va)
                             .cloned()
-                            .unwrap_or_else(|| d.name.to_string().into_owned());
+                            .unwrap_or_else(|| {
+                                x86_c_data_name(d.name.to_string().into_owned(), arch)
+                            });
                         let v = PeVariable {
                             name,
                             va,
@@ -249,7 +251,9 @@ pub fn build_cu_index(
                         let name = mangled_by_va
                             .get(&va)
                             .cloned()
-                            .unwrap_or_else(|| l.name.to_string().into_owned());
+                            .unwrap_or_else(|| {
+                                x86_c_data_name(l.name.to_string().into_owned(), arch)
+                            });
                         all_variables.entry(va).or_insert_with(|| PeVariable {
                             name,
                             va,
@@ -320,6 +324,17 @@ fn section_name_for_va(sections: &[PeSection], va: u64) -> String {
 // ---------------------------------------------------------------------------
 // x86 __stdcall parameter-size helpers
 // ---------------------------------------------------------------------------
+
+/// Apply the x86 C-name underscore prefix to a data symbol that was not found in
+/// the public symbols stream.  On x86, the linker prefixes every C identifier
+/// with `_`; the PDB module-level records store the undecorated source name.
+fn x86_c_data_name(raw: String, arch: PeArch) -> String {
+    if matches!(arch, PeArch::X86) {
+        format!("_{raw}")
+    } else {
+        raw
+    }
+}
 
 /// Sum the stack bytes consumed by every parameter in `arg_list` on x86.
 fn x86_proc_param_bytes(type_finder: &pdb::TypeFinder<'_>, arg_list: pdb::TypeIndex) -> u32 {
