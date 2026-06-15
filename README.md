@@ -1,7 +1,9 @@
-# delink [![Build Status]][actions]
+# delink [![Build Status]][actions] [![Discord Badge]][discord]
 
 [Build Status]: https://github.com/HaydnTrigg/delink/actions/workflows/build.yaml/badge.svg
 [actions]: https://github.com/HaydnTrigg/delink/actions
+[Discord Badge]: https://img.shields.io/badge/Discord-PC/Xbox%20Decompilation-blue?color=%237289DA&logo=discord&logoColor=%23FFFFFF
+[discord]: https://discord.gg/v3xcYgHvNZ
 
 A splitting tool for decompilation projects.
 
