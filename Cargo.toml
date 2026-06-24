@@ -9,6 +9,7 @@ members = [
     "crates/delink-x86",
     "crates/delink-pe",
     "crates/delink-macho",
+    "crates/delink-ida",
     "crates/delink-cli",
 ]
 
@@ -45,6 +46,7 @@ delink-x86_64 = { path = "crates/delink-x86_64" }
 delink-x86 = { path = "crates/delink-x86" }
 delink-pe = { path = "crates/delink-pe" }
 delink-macho = { path = "crates/delink-macho" }
+delink-ida = { path = "crates/delink-ida" }
 
 [profile.release-lto]
 inherits = "release"

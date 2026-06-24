@@ -140,6 +140,43 @@ pub fn load_pe_and_pdb(exe_data: &[u8], pdb_data: &[u8]) -> Result<PeContext> {
     })
 }
 
+/// A PE image without debug info: just sections, image base, and the base
+/// relocation table.
+///
+/// Lighter than [`PeContext`]; for callers (e.g. the IDA importer) that bring
+/// their own function/symbol information and only need the original binary's
+/// bytes and `.reloc` table.
+pub struct PeImage {
+    pub arch: PeArch,
+    pub image_base: u64,
+    pub sections: Vec<PeSection>,
+    /// Base relocations from `.reloc` (empty for images without the table).
+    pub base_relocations: Vec<BaseReloc>,
+}
+
+impl PeImage {
+    pub fn section_for_rva(&self, rva: u64) -> Option<&PeSection> {
+        self.sections.iter().find(|s| s.contains_rva(rva))
+    }
+
+    /// Bytes at `rva` for `len` bytes (sections are zero-extended to virtual size).
+    pub fn data_at_rva(&self, rva: u64, len: usize) -> Option<&[u8]> {
+        self.section_for_rva(rva)?.data_at_rva(rva, len)
+    }
+}
+
+/// Parse a PE executable without a PDB: sections + image base + base relocations.
+pub fn load_pe_image(exe_data: &[u8]) -> Result<PeImage> {
+    let (arch, image_base, sections) = parse_pe_sections(exe_data)?;
+    let base_relocations = parse_base_relocations(&sections, image_base);
+    Ok(PeImage {
+        arch,
+        image_base,
+        sections,
+        base_relocations,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // PE header parsing
 // ---------------------------------------------------------------------------

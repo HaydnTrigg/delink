@@ -20,5 +20,6 @@ delink-core.workspace = true
 delink-emit.workspace = true
 delink-pe.workspace = true
 delink-macho.workspace = true
+delink-ida.workspace = true
 memmap2.workspace = true
 object.workspace = true

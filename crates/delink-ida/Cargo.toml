@@ -1,0 +1,17 @@
+[package]
+name = "delink-ida"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+rayon = { workspace = true }
+object = { workspace = true }
+delink-x86 = { workspace = true }
+delink-x86_64 = { workspace = true }
+delink-pe = { workspace = true }

@@ -148,6 +148,44 @@ enum Cmd {
         #[arg(long)]
         emit_elf: bool,
     },
+
+    // -----------------------------------------------------------------------
+    // IDA import subcommands  (consume JSON produced by crates/delink-ida/ida_export.py)
+    // -----------------------------------------------------------------------
+    /// Inspect a `*.delink.json` exported from IDA: arch, segments, counts.
+    IdaInspect {
+        /// Path to the JSON produced by `ida_export.py`.
+        json: PathBuf,
+    },
+
+    /// Split using an IDA export: one object per function (or per `idapro.json`
+    /// group) plus a shared data object.
+    ///
+    /// For x86/x86-64 the function bytes are disassembled with iced-x86 to
+    /// recover rel32 / RIP-relative relocations; IDA's fixup table supplies the
+    /// absolute pointer relocations.  On the first run a default `idapro.json`
+    /// (one function per file) is written to the output directory; edit it to
+    /// group functions and re-run with `--idapro`.
+    IdaSplit {
+        /// Path to the JSON produced by `ida_export.py`.
+        json: PathBuf,
+        /// Path to the original input binary (the export carries no bytes; the
+        /// function/section bytes and the PE `.reloc` table come from here).
+        binary: PathBuf,
+        /// Output directory for the objects.
+        #[arg(short, long)]
+        outdir: PathBuf,
+        /// Path to an existing `idapro.json` controlling function → file grouping.
+        #[arg(long)]
+        idapro: Option<PathBuf>,
+        /// Emit ELF `.o` objects instead of COFF `.obj` (default is chosen from
+        /// the input file type: PE → COFF, ELF/Mach-O → ELF).
+        #[arg(long)]
+        elf: bool,
+        /// Force COFF output regardless of the input file type.
+        #[arg(long, conflicts_with = "elf")]
+        coff: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -204,6 +242,15 @@ fn main() -> Result<()> {
             symtab,
             emit_elf,
         } => cmd_macho_split(&input, &outdir, symtab.as_deref(), emit_elf),
+        Cmd::IdaInspect { json } => cmd_ida_inspect(&json),
+        Cmd::IdaSplit {
+            json,
+            binary,
+            outdir,
+            idapro,
+            elf,
+            coff,
+        } => cmd_ida_split(&json, &binary, &outdir, idapro.as_deref(), elf, coff),
     }
 }
 
@@ -982,6 +1029,156 @@ fn cmd_pe_split(exe_path: &Path, pdb_path: &Path, outdir: &Path) -> Result<()> {
         shared_stats.data_bytes,
         shared_stats.bss_bytes,
         shared_stats.addr64_relocs,
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// IDA import subcommands
+// ---------------------------------------------------------------------------
+
+fn cmd_ida_inspect(json: &Path) -> Result<()> {
+    let model = delink_ida::load(json)?;
+
+    println!(
+        "IDA export  arch={:?} ({}) {}-bit  filetype={}",
+        model.arch, model.procname, model.bits, model.filetype
+    );
+    println!("input: {}", model.input_file);
+    println!("\nSEGMENTS");
+    println!(
+        "  {:<14} {:<6} {:>16} {:>10}  perms",
+        "name", "class", "addr", "size"
+    );
+    for s in &model.sections {
+        let perms = format!(
+            "{}{}{}",
+            if s.read { "r" } else { "-" },
+            if s.write { "w" } else { "-" },
+            if s.exec { "x" } else { "-" },
+        );
+        println!(
+            "  {:<14} {:<6?} {:#016x} {:>10}  {}",
+            s.name,
+            s.class,
+            s.start,
+            s.size(),
+            perms
+        );
+    }
+    let text: u64 = model.functions.iter().map(|f| f.size()).sum();
+    println!(
+        "\nfunctions: {}  ({} bytes)\nnames: {}\nrelocations (fixups): {}",
+        model.functions.len(),
+        text,
+        model.names.len(),
+        model.relocations.len(),
+    );
+    Ok(())
+}
+
+fn cmd_ida_split(
+    json: &Path,
+    binary: &Path,
+    outdir: &Path,
+    idapro_arg: Option<&Path>,
+    elf: bool,
+    coff: bool,
+) -> Result<()> {
+    use delink_ida::emit::OutputFormat;
+
+    let model = delink_ida::load(json)?;
+    let pe = delink_ida::load_binary(binary)?;
+    let relocs = delink_ida::combined_relocations(&model, &pe);
+    let symbols = delink_ida::IdaSymbols::build(&model, &relocs);
+    tracing::info!(
+        "ida-split: {} relocations ({} IDA fixups + {} PE .reloc, combined)",
+        relocs.len(),
+        model.relocations.len(),
+        pe.base_relocations.len(),
+    );
+
+    let format = if elf {
+        OutputFormat::Elf
+    } else if coff {
+        OutputFormat::Coff
+    } else {
+        OutputFormat::default_for_filetype(&model.filetype)
+    };
+    tracing::info!(
+        "ida-split: arch={:?} format={:?} ({} functions)",
+        model.arch,
+        format,
+        model.functions.len()
+    );
+
+    std::fs::create_dir_all(outdir).with_context(|| format!("create {}", outdir.display()))?;
+
+    // Grouping: explicit --idapro overrides the generated default.
+    let groups: delink_ida::idapro_json::IdaproJson = if let Some(p) = idapro_arg {
+        let raw =
+            std::fs::read_to_string(p).with_context(|| format!("read idapro {}", p.display()))?;
+        serde_json::from_str(&raw).with_context(|| format!("parse idapro {}", p.display()))?
+    } else {
+        delink_ida::idapro_json::generate(&model, format.ext())
+    };
+
+    let idapro_out = outdir.join("idapro.json");
+    std::fs::write(
+        &idapro_out,
+        serde_json::to_string_pretty(&groups).context("serialize idapro")?,
+    )
+    .with_context(|| format!("write {}", idapro_out.display()))?;
+    tracing::info!("idapro → {}", idapro_out.display());
+
+    let outcomes =
+        delink_ida::emit::split_by_groups(&model, &pe, &symbols, &groups, outdir, format)?;
+
+    let shared_ext = if matches!(format, OutputFormat::Elf) {
+        "o"
+    } else {
+        "obj"
+    };
+    let shared = outdir.join(format!("__shared_data.{shared_ext}"));
+    tracing::info!("emitting shared data → {}", shared.display());
+    let shared_stats = delink_ida::emit::emit_shared(&model, &pe, &symbols, &shared, format)?;
+
+    // Summary.
+    let mut total = delink_ida::emit::EmitStats::default();
+    let mut failures = 0usize;
+    for o in &outcomes {
+        match &o.result {
+            Ok(s) => {
+                total.text_bytes += s.text_bytes;
+                total.instructions += s.instructions;
+                total.local_symbols += s.local_symbols;
+                total.undef_symbols += s.undef_symbols;
+                total.relocations += s.relocations;
+                total.unresolved_calls += s.unresolved_calls;
+                total.unresolved_rip += s.unresolved_rip;
+            }
+            Err(e) => {
+                failures += 1;
+                tracing::warn!(obj = %o.cu_name, error = %e, "emit failed");
+            }
+        }
+    }
+
+    println!(
+        "ida-split complete: {} objects ({} failed)\n  {} bytes .text, {} instructions\n  {} local + {} undef symbols\n  {} relocs ({} unresolved calls, {} unresolved rip refs)\n  shared: data={} const={} bss={} ({} relocs)",
+        outcomes.len().saturating_sub(failures),
+        failures,
+        total.text_bytes,
+        total.instructions,
+        total.local_symbols,
+        total.undef_symbols,
+        total.relocations,
+        total.unresolved_calls,
+        total.unresolved_rip,
+        shared_stats.data_bytes,
+        shared_stats.const_bytes,
+        shared_stats.bss_bytes,
+        shared_stats.relocations,
     );
     Ok(())
 }

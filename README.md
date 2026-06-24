@@ -11,6 +11,44 @@ A splitting tool for decompilation projects.
 - Shared Object (.so) files with DWARF
 - Mach-O STABS and SYMTAB
 - Windows PE with PDB's (.exe/.pdb).
+- Any binary IDA can analyse, via the [IDA import](#ida-import) workflow.
+
+## IDA import
+
+When you don't have debug info but do have an IDA database, you can split using
+IDA's analysis. There are two pieces, decoupled by a JSON file so delink never
+has to link against IDA:
+
+1. **Export** (inside IDA 9.x). Run [`crates/delink-ida/ida_export.py`](crates/delink-ida/ida_export.py)
+   to write a small, human-readable JSON describing the architecture/segment
+   layout, every function (boundaries + flags), the full address → name map, and
+   the relocations IDA knows (its fixup table **and** offset-typed operands —
+   the latter being the only relocation record for images with no `.reloc`,
+   e.g. EXEs). The export carries **no bytes**:
+
+   ```shell
+   # headless (idat64.exe for a 64-bit database)
+   "idat.exe" -A -S"crates\delink-ida\ida_export.py delink.ida.json" database.idb
+   ```
+   or, interactively, File → Script file… and pick the script.
+
+2. **Import + split** (delink). Pass the JSON **and the original binary** (the
+   bytes and the PE `.reloc` table come from there):
+
+   ```shell
+   delink ida-split delink.ida.json binary.exe -o ./output
+   ```
+
+   For **x86 / x86-64** targets delink disassembles each function with iced-x86
+   to recover rel32 call/jump relocations, and combines IDA's relocations with
+   the binary's `.reloc` table for absolute pointers, resolving every target
+   through the exported name map. Output is COFF `.obj` for PE inputs (use
+   `--elf` for ELF `.o`).
+
+   As with the Mach-O splitter, the first run writes an editable `idapro.json`
+   grouping (`{ "<obj>": { "<sym>": {address, size, scope} } }`) into the output
+   directory. Edit it to group symbols into objects (and rename keys to rename
+   files), then re-run with `--idapro ./out/idapro.json`.
 
 ## Building
 

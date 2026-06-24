@@ -220,6 +220,7 @@ dependencies = [
  "clap",
  "delink-core",
  "delink-emit",
+ "delink-ida",
  "delink-macho",
  "delink-pe",
  "memmap2",
@@ -253,6 +254,21 @@ dependencies = [
  "object",
  "rayon",
  "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "delink-ida"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "delink-pe",
+ "delink-x86",
+ "delink-x86_64",
+ "object",
+ "rayon",
+ "serde",
+ "serde_json",
  "tracing",
 ]
 
