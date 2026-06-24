@@ -386,7 +386,7 @@ fn emit_object(
             }
         }
 
-        let fn_off = obj.append_section_data(sid, &bytes, 16);
+        let fn_off = obj.append_section_data(sid, &bytes, 1);
 
         let scope = if *public {
             SymbolScope::Dynamic
