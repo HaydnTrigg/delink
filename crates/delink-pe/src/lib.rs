@@ -97,6 +97,9 @@ pub struct PeContext {
     pub base_relocations: Vec<BaseReloc>,
     /// IAT slot VA → `"__imp_funcname"` symbol name.
     pub imports: HashMap<u64, String>,
+    /// Mangled names of procedures the PDB marks as declared inline
+    /// (`S_FRAMEPROC` `fInlSpec`), sorted and de-duplicated.
+    pub inlined_functions: Vec<String>,
 }
 
 impl PeContext {
@@ -119,7 +122,7 @@ pub fn load_pe_and_pdb(exe_data: &[u8], pdb_data: &[u8]) -> Result<PeContext> {
     let base_relocations = parse_base_relocations(&sections, image_base);
     let imports = parse_imports(exe_data, &sections, image_base, arch);
 
-    let (cu_index, all_functions, all_variables) =
+    let (cu_index, all_functions, all_variables, inlined_functions) =
         cu::build_cu_index(pdb_data, image_base, &sections, arch)?;
     let symbols = symbols::PeGlobalSymbols::build(
         all_functions,
@@ -137,6 +140,7 @@ pub fn load_pe_and_pdb(exe_data: &[u8], pdb_data: &[u8]) -> Result<PeContext> {
         symbols,
         base_relocations,
         imports,
+        inlined_functions,
     })
 }
 

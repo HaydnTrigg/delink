@@ -5,12 +5,32 @@
 
 use anyhow::{Context, Result};
 use pdb::FallibleIterator;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::{PeArch, PeSection};
 
 // CV calling convention code for __stdcall (near standard call, callee cleans stack).
 const CV_CALL_NEAR_STD: u8 = 0x07;
+
+// CodeView `S_FRAMEPROC` record (0x1012): extra frame/proc information emitted
+// immediately after each procedure symbol. Its 32-bit flags word carries
+// `fInlSpec` (bit 5) = "function was declared inline" — the same signal
+// pdb-decompiler uses to prefix functions with its `_inline` macro.
+//
+// Within `Symbol::raw_bytes()` (record type included, length prefix excluded)
+// the flags word sits at byte offset 24:
+//   [0..2] rectyp │ [2..6] cbFrame │ [6..10] cbPad │ [10..14] offPad
+//   [14..18] cbSaveRegs │ [18..22] offExHdlr │ [22..24] sectExHdlr │ [24..28] flags
+const S_FRAMEPROC: u16 = 0x1012;
+const FRAMEPROC_FLAGS_OFFSET: usize = 24;
+const FRAMEPROC_INLINE_SPEC: u32 = 1 << 5;
+
+/// Test the `fInlSpec` (declared-inline) bit of an `S_FRAMEPROC` record's flags word.
+fn frameproc_declared_inline(raw: &[u8]) -> bool {
+    raw.get(FRAMEPROC_FLAGS_OFFSET..FRAMEPROC_FLAGS_OFFSET + 4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()) & FRAMEPROC_INLINE_SPEC != 0)
+        .unwrap_or(false)
+}
 
 #[derive(Debug, Clone)]
 pub struct PeFunction {
@@ -83,9 +103,15 @@ type CuIndexResult = (
     PeCuIndex,
     BTreeMap<u64, PeFunction>,
     BTreeMap<u64, PeVariable>,
+    Vec<String>,
 );
 
-/// Parse a PDB and return `(CuIndex, all_functions_by_VA, all_variables_by_VA)`.
+/// Parse a PDB and return
+/// `(CuIndex, all_functions_by_VA, all_variables_by_VA, inlined_function_names)`.
+///
+/// `inlined_function_names` are the mangled names of every procedure whose
+/// `S_FRAMEPROC` record marks it as declared inline (`fInlSpec`), sorted and
+/// de-duplicated.
 ///
 /// `image_base` is from the PE optional header; `sections` are the PE
 /// sections (needed to look up section names for contributions).
@@ -171,6 +197,7 @@ pub fn build_cu_index(
     let mut units: Vec<PeCompilationUnit> = Vec::new();
     let mut all_functions: BTreeMap<u64, PeFunction> = BTreeMap::new();
     let mut all_variables: BTreeMap<u64, PeVariable> = BTreeMap::new();
+    let mut inlined_functions: BTreeSet<String> = BTreeSet::new();
     let mut cu_id = 0usize;
     let mut mod_index = 0usize;
 
@@ -182,10 +209,25 @@ pub fn build_cu_index(
         let mut functions: Vec<PeFunction> = Vec::new();
 
         if let Some(mod_info) = pdb.module_info(&module).context("module info")? {
+            // Mangled name of the procedure currently in scope, so the
+            // `S_FRAMEPROC` record that follows it can be attributed correctly.
+            let mut current_proc_name: Option<String> = None;
             let mut sym_iter = mod_info.symbols().context("module symbols")?;
             while let Some(sym) = sym_iter.next()? {
+                // `S_FRAMEPROC` isn't parsed by the `pdb` crate; read its flags
+                // from the raw record and mark the enclosing procedure inline.
+                if sym.raw_kind() == S_FRAMEPROC {
+                    if let Some(name) = &current_proc_name {
+                        if frameproc_declared_inline(sym.raw_bytes()) {
+                            inlined_functions.insert(name.clone());
+                        }
+                    }
+                    continue;
+                }
                 match sym.parse() {
                     Ok(pdb::SymbolData::Procedure(p)) => {
+                        // A new procedure scope begins; clear until validated.
+                        current_proc_name = None;
                         let Some(rva) = p.offset.to_rva(&address_map) else {
                             continue;
                         };
@@ -204,6 +246,7 @@ pub fn build_cu_index(
                                 raw
                             }
                         });
+                        current_proc_name = Some(name.clone());
                         let f = PeFunction {
                             name,
                             va,
@@ -299,7 +342,12 @@ pub fn build_cu_index(
         });
     }
 
-    Ok((PeCuIndex { units }, all_functions, all_variables))
+    Ok((
+        PeCuIndex { units },
+        all_functions,
+        all_variables,
+        inlined_functions.into_iter().collect(),
+    ))
 }
 
 fn section_name_for_va(sections: &[PeSection], va: u64) -> String {

@@ -684,6 +684,15 @@ pub fn emit_pe_shared(pe: &PeContext, out_path: &Path) -> Result<SharedDataStats
 pub fn split_all_pe(pe: &PeContext, out_dir: &Path) -> Result<Vec<CuOutcome>> {
     std::fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
 
+    // Emit the mangled names of all PDB-declared inline functions.
+    let inlined_path = out_dir.join("inlined_functions.txt");
+    let mut inlined_txt = pe.inlined_functions.join("\n");
+    if !inlined_txt.is_empty() {
+        inlined_txt.push('\n');
+    }
+    std::fs::write(&inlined_path, inlined_txt)
+        .with_context(|| format!("write {}", inlined_path.display()))?;
+
     let outcomes: Vec<CuOutcome> = pe
         .cu_index
         .units
