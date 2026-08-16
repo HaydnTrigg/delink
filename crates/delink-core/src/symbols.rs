@@ -522,8 +522,8 @@ fn build_got_maps(
 
 fn is_relative_reloc(arch: Arch, r_type: u32) -> bool {
     match arch {
-        Arch::Aarch64 => r_type == object::elf::R_AARCH64_RELATIVE,
-        Arch::Arm => r_type == object::elf::R_ARM_RELATIVE,
+        Arch::Aarch64 => r_type == object::elf::R_AARCH64_RELATIVE.0,
+        Arch::Arm => r_type == object::elf::R_ARM_RELATIVE.0,
     }
 }
 

@@ -157,7 +157,7 @@ fn parse_sections(file: &object::File<'_>) -> Result<Vec<MachoSection>> {
         let size = section.size();
         let data = section.data().unwrap_or(&[]).to_vec();
         let flags = match section.flags() {
-            SectionFlags::MachO { flags } => flags,
+            SectionFlags::MachO { flags, .. } => flags.0,
             _ => 0,
         };
         sections.push(MachoSection {

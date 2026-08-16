@@ -21,7 +21,7 @@ use crate::symbols::{SYM_BSS_START, SYM_CONST_START, SYM_DATA_START};
 use crate::{MachoArch, MachoContext};
 
 // Mach-O i386 relocation constants (GENERIC_RELOC_VANILLA = 0).
-const GENERIC_RELOC_VANILLA: u8 = object::macho::GENERIC_RELOC_VANILLA;
+const GENERIC_RELOC_VANILLA: object::macho::RelocationType = object::macho::GENERIC_RELOC_VANILLA;
 // r_length = 2 → 4-byte field (2^2 = 4).
 const R_LENGTH_4: u8 = 2;
 

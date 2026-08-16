@@ -29,9 +29,9 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 memmap2 = "0.9"
-object = { version = "0.39.1", default-features = false, features = ["read", "write", "elf", "pe", "coff", "macho", "std"] }
-gimli = { version = "0.33.0", default-features = false, features = ["read", "std"] }
-addr2line = { version = "0.24", default-features = false, features = ["std", "loader"] }
+object = { version = "0.40.0", default-features = false, features = ["read", "write", "elf", "pe", "coff", "macho", "std"] }
+gimli = { version = "0.34.0", default-features = false, features = ["read", "std"] }
+addr2line = { version = "0.27", default-features = false, features = ["std", "loader"] }
 capstone = "0.14.0"
 iced-x86 = { version = "1", default-features = false, features = ["decoder", "instr_info", "std"] }
 clap = { version = "4", features = ["derive"] }

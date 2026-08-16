@@ -117,13 +117,16 @@ fn count_dyn_relocs(binary: &Binary<'_>) -> Vec<(String, usize)> {
 
 /// Human-readable name for a relocation type.
 pub fn reloc_name(arch: Arch, t: u32) -> String {
+    // `object` models `r_type` as a per-format newtype; we carry the raw value
+    // around and wrap it only to match against the constants.
+    let t = object::elf::RelocationType(t);
     match arch {
         Arch::Aarch64 => aarch64_reloc_name(t),
         Arch::Arm => arm_reloc_name(t),
     }
 }
 
-fn arm_reloc_name(t: u32) -> String {
+fn arm_reloc_name(t: object::elf::RelocationType) -> String {
     use object::elf::*;
     let name = match t {
         R_ARM_NONE => "R_ARM_NONE",
@@ -155,7 +158,7 @@ fn arm_reloc_name(t: u32) -> String {
     name.to_string()
 }
 
-fn aarch64_reloc_name(t: u32) -> String {
+fn aarch64_reloc_name(t: object::elf::RelocationType) -> String {
     use object::elf::*;
     let name = match t {
         R_AARCH64_NONE => "R_AARCH64_NONE",

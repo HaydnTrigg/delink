@@ -21,14 +21,14 @@ use crate::cu::{PeCompilationUnit, PeFunction};
 use crate::{BaseRelocKind, PeArch, PeContext, PeSection};
 
 // AMD64 relocation type constants.
-const REL_AMD64_ADDR64: u16 = object::pe::IMAGE_REL_AMD64_ADDR64;
-const REL_AMD64_ADDR32NB: u16 = object::pe::IMAGE_REL_AMD64_ADDR32NB;
-const REL_AMD64_SECREL: u16 = object::pe::IMAGE_REL_AMD64_SECREL;
-const REL_AMD64_REL32: u16 = object::pe::IMAGE_REL_AMD64_REL32;
+const REL_AMD64_ADDR64: u16 = object::pe::IMAGE_REL_AMD64_ADDR64.0;
+const REL_AMD64_ADDR32NB: u16 = object::pe::IMAGE_REL_AMD64_ADDR32NB.0;
+const REL_AMD64_SECREL: u16 = object::pe::IMAGE_REL_AMD64_SECREL.0;
+const REL_AMD64_REL32: u16 = object::pe::IMAGE_REL_AMD64_REL32.0;
 
 // I386 relocation type constants.
-const REL_I386_DIR32: u16 = object::pe::IMAGE_REL_I386_DIR32;
-const REL_I386_REL32: u16 = object::pe::IMAGE_REL_I386_REL32;
+const REL_I386_DIR32: u16 = object::pe::IMAGE_REL_I386_DIR32.0;
+const REL_I386_REL32: u16 = object::pe::IMAGE_REL_I386_REL32.0;
 
 // object::write::coff::coff_adjust_addend (pub(crate), not externally callable) adds the
 // field width to every REL32 addend before embedding it in the section bytes.  It uses the
@@ -287,7 +287,9 @@ pub fn emit_pe_cu(
                             offset: fn_offset + remap_after_strip(off, &f3),
                             symbol: sym,
                             addend,
-                            flags: RelocationFlags::Coff { typ },
+                            flags: RelocationFlags::Coff {
+                                typ: object::pe::RelocationType(typ),
+                            },
                         },
                     )
                     .with_context(|| format!("add ADDR64 reloc at {:#x}", f.va + off))?;
@@ -333,7 +335,9 @@ pub fn emit_pe_cu(
                             offset: fn_offset + remap_after_strip(r.offset, &f3),
                             symbol: sym_id,
                             addend,
-                            flags: RelocationFlags::Coff { typ },
+                            flags: RelocationFlags::Coff {
+                                typ: object::pe::RelocationType(typ),
+                            },
                         },
                     )
                     .with_context(|| format!("add reloc at {:#x}", r.offset))?;
@@ -444,7 +448,9 @@ pub fn emit_pe_cu(
                             offset: fn_offset + remap_after_strip(off, &f3),
                             symbol: sym,
                             addend,
-                            flags: RelocationFlags::Coff { typ },
+                            flags: RelocationFlags::Coff {
+                                typ: object::pe::RelocationType(typ),
+                            },
                         },
                     )
                     .with_context(|| format!("add DIR32 reloc at {:#x}", f.va + off))?;
@@ -460,7 +466,7 @@ pub fn emit_pe_cu(
                             symbol: sym_id,
                             addend: r.addend - REL32_FIELD_BYTES,
                             flags: RelocationFlags::Coff {
-                                typ: REL_I386_REL32,
+                                typ: object::pe::RelocationType(REL_I386_REL32),
                             },
                         },
                     )
@@ -561,7 +567,9 @@ pub fn emit_pe_cu(
                         offset: section_base + off,
                         symbol: sym,
                         addend,
-                        flags: RelocationFlags::Coff { typ },
+                        flags: RelocationFlags::Coff {
+                            typ: object::pe::RelocationType(typ),
+                        },
                     },
                 )
                 .with_context(|| format!("add data reloc at {:#x}", contrib.va + off))?;
@@ -731,7 +739,9 @@ pub fn emit_pe_shared(pe: &PeContext, out_path: &Path) -> Result<SharedDataStats
                     offset: section_offset,
                     symbol: sym_id,
                     addend,
-                    flags: RelocationFlags::Coff { typ: abs_reloc_typ },
+                    flags: RelocationFlags::Coff {
+                        typ: object::pe::RelocationType(abs_reloc_typ),
+                    },
                 },
             )
             .with_context(|| format!("add shared abs reloc at {:#x}", br.va))?;

@@ -349,7 +349,9 @@ pub fn emit_cu(binary: &Binary<'_>, opts: EmitOptions<'_>, out_path: &Path) -> R
                     offset: section_offset,
                     symbol: sym_id,
                     addend: r.addend,
-                    flags: RelocationFlags::Elf { r_type: r.r_type },
+                    flags: RelocationFlags::Elf {
+                        r_type: object::elf::RelocationType(r.r_type),
+                    },
                 },
             )
             .with_context(|| format!("add reloc at {:#x}", section_offset))?;
@@ -569,17 +571,17 @@ fn aarch64_reloc_type(kind: delink_aarch64::RelocKind) -> u32 {
     use delink_aarch64::RelocKind;
     use object::elf::*;
     match kind {
-        RelocKind::Call26 => R_AARCH64_CALL26,
-        RelocKind::Jump26 => R_AARCH64_JUMP26,
-        RelocKind::AdrPrelPgHi21 => R_AARCH64_ADR_PREL_PG_HI21,
-        RelocKind::AddAbsLo12Nc => R_AARCH64_ADD_ABS_LO12_NC,
-        RelocKind::Ldst8AbsLo12Nc => R_AARCH64_LDST8_ABS_LO12_NC,
-        RelocKind::Ldst16AbsLo12Nc => R_AARCH64_LDST16_ABS_LO12_NC,
-        RelocKind::Ldst32AbsLo12Nc => R_AARCH64_LDST32_ABS_LO12_NC,
-        RelocKind::Ldst64AbsLo12Nc => R_AARCH64_LDST64_ABS_LO12_NC,
-        RelocKind::Ldst128AbsLo12Nc => R_AARCH64_LDST128_ABS_LO12_NC,
-        RelocKind::AdrGotPage => R_AARCH64_ADR_GOT_PAGE,
-        RelocKind::Ld64GotLo12Nc => R_AARCH64_LD64_GOT_LO12_NC,
+        RelocKind::Call26 => R_AARCH64_CALL26.0,
+        RelocKind::Jump26 => R_AARCH64_JUMP26.0,
+        RelocKind::AdrPrelPgHi21 => R_AARCH64_ADR_PREL_PG_HI21.0,
+        RelocKind::AddAbsLo12Nc => R_AARCH64_ADD_ABS_LO12_NC.0,
+        RelocKind::Ldst8AbsLo12Nc => R_AARCH64_LDST8_ABS_LO12_NC.0,
+        RelocKind::Ldst16AbsLo12Nc => R_AARCH64_LDST16_ABS_LO12_NC.0,
+        RelocKind::Ldst32AbsLo12Nc => R_AARCH64_LDST32_ABS_LO12_NC.0,
+        RelocKind::Ldst64AbsLo12Nc => R_AARCH64_LDST64_ABS_LO12_NC.0,
+        RelocKind::Ldst128AbsLo12Nc => R_AARCH64_LDST128_ABS_LO12_NC.0,
+        RelocKind::AdrGotPage => R_AARCH64_ADR_GOT_PAGE.0,
+        RelocKind::Ld64GotLo12Nc => R_AARCH64_LD64_GOT_LO12_NC.0,
     }
 }
 
@@ -990,10 +992,11 @@ fn emit_arm_unwind(
     let sid = obj.add_section(
         Vec::new(),
         b".ARM.exidx".to_vec(),
-        SectionKind::Elf(object::elf::SHT_ARM_EXIDX),
+        SectionKind::ReadOnlyData,
     );
     obj.section_mut(sid).flags = SectionFlags::Elf {
-        sh_flags: object::elf::SHF_ALLOC as u64,
+        sh_type: object::elf::SHT_ARM_EXIDX,
+        sh_flags: object::elf::SHF_ALLOC,
     };
     obj.append_section_data(sid, &bytes, 4);
 
@@ -1231,14 +1234,14 @@ enum DynClass {
 fn classify_dyn_reloc(arch: Arch, rel: &DynReloc) -> DynClass {
     use object::elf::*;
     match arch {
-        Arch::Aarch64 => match rel.r_type {
+        Arch::Aarch64 => match object::elf::RelocationType(rel.r_type) {
             R_AARCH64_RELATIVE => DynClass::Relative,
             R_AARCH64_ABS64 => DynClass::Abs,
             R_AARCH64_GLOB_DAT => DynClass::GlobDat,
             R_AARCH64_JUMP_SLOT => DynClass::JumpSlot,
             _ => DynClass::Other,
         },
-        Arch::Arm => match rel.r_type {
+        Arch::Arm => match object::elf::RelocationType(rel.r_type) {
             R_ARM_RELATIVE => DynClass::Relative,
             R_ARM_ABS32 | R_ARM_TARGET1 => DynClass::Abs,
             R_ARM_GLOB_DAT => DynClass::GlobDat,

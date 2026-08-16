@@ -660,12 +660,12 @@ fn push_pool_reloc(
 pub fn elf_reloc_type(kind: RelocKind) -> u32 {
     use object::elf::*;
     match kind {
-        RelocKind::Call => R_ARM_CALL,
-        RelocKind::Jump24 => R_ARM_JUMP24,
-        RelocKind::Rel32 => R_ARM_REL32,
-        RelocKind::GotPrel => R_ARM_GOT_PREL,
-        RelocKind::Abs32 => R_ARM_ABS32,
-        RelocKind::Prel31 => R_ARM_PREL31,
+        RelocKind::Call => R_ARM_CALL.0,
+        RelocKind::Jump24 => R_ARM_JUMP24.0,
+        RelocKind::Rel32 => R_ARM_REL32.0,
+        RelocKind::GotPrel => R_ARM_GOT_PREL.0,
+        RelocKind::Abs32 => R_ARM_ABS32.0,
+        RelocKind::Prel31 => R_ARM_PREL31.0,
     }
 }
 

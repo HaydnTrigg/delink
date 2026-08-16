@@ -35,7 +35,7 @@ impl<'a> Binary<'a> {
         if !raw.little_endian {
             return Err(Error::Unsupported("big-endian ELF".into()));
         }
-        if raw.e_type != object::elf::ET_DYN {
+        if raw.e_type != object::elf::ET_DYN.0 {
             return Err(Error::Unsupported(format!(
                 "expected ET_DYN shared object, got e_type=0x{:x}",
                 raw.e_type

@@ -681,7 +681,7 @@ fn cmd_readobj(path: &Path) -> Result<()> {
                 object::RelocationFlags::Elf { r_type } => {
                     format!(
                         "elf_type={}",
-                        delink_core::inspect::reloc_name(arch, r_type)
+                        delink_core::inspect::reloc_name(arch, r_type.0)
                     )
                 }
                 other => format!("{:?}", other),
