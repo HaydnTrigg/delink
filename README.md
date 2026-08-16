@@ -8,7 +8,8 @@
 A splitting tool for decompilation projects.
 
 ## Supported Formats:
-- Shared Object (.so) files with DWARF
+- Shared Object (.so) files, AArch64 (ELF64) and 32-bit ARM (ELF32), split by
+  DWARF compilation units or by [`.symtab` translation units](#elf-splitting).
 - Mach-O STABS and SYMTAB
 - Windows PE with PDB's (.exe/.pdb).
 - Any binary IDA can analyse, via the [IDA import](#ida-import) workflow.

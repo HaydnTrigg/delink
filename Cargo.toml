@@ -4,6 +4,7 @@ members = [
     "crates/delink-core",
     "crates/delink-arch",
     "crates/delink-aarch64",
+    "crates/delink-arm",
     "crates/delink-emit",
     "crates/delink-x86_64",
     "crates/delink-x86",
@@ -41,6 +42,7 @@ pdb = "0.8"
 delink-core = { path = "crates/delink-core" }
 delink-arch = { path = "crates/delink-arch" }
 delink-aarch64 = { path = "crates/delink-aarch64" }
+delink-arm = { path = "crates/delink-arm" }
 delink-emit = { path = "crates/delink-emit" }
 delink-x86_64 = { path = "crates/delink-x86_64" }
 delink-x86 = { path = "crates/delink-x86" }

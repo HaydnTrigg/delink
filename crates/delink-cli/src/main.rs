@@ -1,6 +1,22 @@
 use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+/// Where `split` gets its compilation-unit boundaries.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum GroupBy {
+    /// DWARF if it covers more `.text` than `.symtab` does, else `.symtab`.
+    Auto,
+    /// DWARF compilation units only.
+    Dwarf,
+    /// `.symtab` `STT_FILE` translation units only.
+    Symtab,
+}
+
+/// The editable grouping file: output `.o` name → the function symbols it
+/// should contain.
+type ObjectsJson = BTreeMap<String, Vec<String>>;
 
 #[derive(Parser)]
 #[command(
@@ -55,6 +71,13 @@ enum Cmd {
     },
 
     /// Split the whole `.so` into one `.o` per CU plus `__shared_data.o`.
+    ///
+    /// Compilation units come from DWARF when the binary carries useful debug
+    /// info, and otherwise from `.symtab`: `ld` writes an `STT_FILE` symbol
+    /// ahead of each input object's local symbols, which reconstructs the
+    /// original translation units. Either way a `objects.json` describing the
+    /// grouping is written to the output directory; edit it and re-run with
+    /// `--objects` to regroup.
     Split {
         input: PathBuf,
         #[arg(short, long)]
@@ -67,6 +90,13 @@ enum Cmd {
         /// Required for `--comdat` and for `ld --gc-sections` to work.
         #[arg(long)]
         per_function_sections: bool,
+        /// Where compilation units come from.
+        #[arg(long, value_enum, default_value_t = GroupBy::Auto)]
+        group_by: GroupBy,
+        /// Path to an existing `objects.json` controlling function → file
+        /// grouping. Overrides `--group-by`.
+        #[arg(long)]
+        objects: Option<PathBuf>,
     },
 
     // -----------------------------------------------------------------------
@@ -224,7 +254,17 @@ fn main() -> Result<()> {
             comdat,
             dwarf,
             per_function_sections,
-        } => cmd_split(&input, &outdir, comdat, dwarf, per_function_sections),
+            group_by,
+            objects,
+        } => cmd_split(
+            &input,
+            &outdir,
+            comdat,
+            dwarf,
+            per_function_sections,
+            group_by,
+            objects.as_deref(),
+        ),
         Cmd::PeInspect { input, pdb } => cmd_pe_inspect(&input, &pdb),
         Cmd::PeListCus {
             input,
@@ -262,21 +302,202 @@ fn main() -> Result<()> {
     }
 }
 
+/// Build the compilation-unit index `split` will emit from.
+///
+/// Returns the index, the `.symtab` index (kept so data symbols can be folded
+/// into the resolver), and a label naming the source that was used.
+fn build_split_index(
+    binary: &delink_core::Binary<'_>,
+    group_by: GroupBy,
+) -> Result<(
+    delink_core::cu::CuIndex,
+    delink_core::symtab::SymtabIndex,
+    &'static str,
+)> {
+    let symtab = delink_core::symtab::SymtabIndex::build(binary)?;
+
+    let dwarf_index = if group_by == GroupBy::Symtab {
+        None
+    } else {
+        tracing::info!("indexing DWARF…");
+        Some(delink_core::cu::CuIndex::build(binary)?)
+    };
+    let dwarf_coverage: u64 = dwarf_index
+        .as_ref()
+        .map(|i| {
+            i.units
+                .iter()
+                .flat_map(|u| u.functions.iter())
+                .map(|f| f.size)
+                .sum()
+        })
+        .unwrap_or(0);
+    let symtab_coverage = symtab.text_coverage();
+
+    let use_dwarf = match group_by {
+        GroupBy::Dwarf => true,
+        GroupBy::Symtab => false,
+        GroupBy::Auto => dwarf_coverage >= symtab_coverage && dwarf_coverage > 0,
+    };
+
+    if group_by == GroupBy::Auto {
+        tracing::info!(
+            "coverage: DWARF {dwarf_coverage} bytes vs .symtab {symtab_coverage} bytes → using {}",
+            if use_dwarf { "DWARF" } else { ".symtab" }
+        );
+    }
+
+    if use_dwarf {
+        let idx =
+            dwarf_index.ok_or_else(|| anyhow!("--group-by dwarf but no DWARF was indexed"))?;
+        if idx.units.is_empty() {
+            return Err(anyhow!(
+                "no DWARF compilation units found; re-run with --group-by symtab"
+            ));
+        }
+        Ok((idx, symtab, "dwarf"))
+    } else {
+        if symtab.groups.is_empty() && symtab_coverage == 0 {
+            return Err(anyhow!(
+                "no usable .symtab: the binary appears stripped, and DWARF covers {dwarf_coverage} bytes"
+            ));
+        }
+        let idx = symtab.to_cu_index();
+        Ok((idx, symtab, "symtab"))
+    }
+}
+
+/// Serialize a CU index as the editable grouping file.
+fn objects_json_from_index(idx: &delink_core::cu::CuIndex) -> ObjectsJson {
+    let mut out = ObjectsJson::new();
+    for cu in &idx.units {
+        let mut fns: Vec<_> = cu.functions.iter().filter(|f| f.size > 0).collect();
+        if fns.is_empty() {
+            continue;
+        }
+        fns.sort_by_key(|f| f.addr);
+        let stem = delink_emit::sanitize_cu_name(&cu.name);
+        out.insert(
+            format!("{:04}_{stem}.o", cu.id),
+            fns.iter()
+                .map(|f| f.linkage_name.clone().unwrap_or_else(|| f.name.clone()))
+                .collect(),
+        );
+    }
+    out
+}
+
+/// Rebuild a CU index from an edited grouping file, pulling each function's
+/// address and size out of `source`.
+fn regroup_index(
+    source: &delink_core::cu::CuIndex,
+    objects: &ObjectsJson,
+) -> Result<delink_core::cu::CuIndex> {
+    let mut by_name: BTreeMap<&str, &delink_core::cu::Function> = BTreeMap::new();
+    for cu in &source.units {
+        for f in &cu.functions {
+            let key = f.linkage_name.as_deref().unwrap_or(f.name.as_str());
+            by_name.entry(key).or_insert(f);
+        }
+    }
+
+    let mut units = Vec::new();
+    let mut missing = 0usize;
+    for (id, (file, names)) in objects.iter().enumerate() {
+        let functions: Vec<_> = names
+            .iter()
+            .filter_map(|n| match by_name.get(n.as_str()) {
+                Some(f) => Some((*f).clone()),
+                None => {
+                    missing += 1;
+                    tracing::warn!(symbol = %n, file = %file, "not found in the binary; skipped");
+                    None
+                }
+            })
+            .collect();
+        if functions.is_empty() {
+            continue;
+        }
+        let ranges = functions.iter().map(|f| f.addr..f.addr + f.size).collect();
+        // Keys in the grouping file are output filenames and are used
+        // verbatim, so renaming one renames the object it produces.
+        let file_name = if file.ends_with(".o") {
+            file.clone()
+        } else {
+            format!("{file}.o")
+        };
+        units.push(delink_core::cu::CompilationUnit {
+            id,
+            name: file.strip_suffix(".o").unwrap_or(file).to_string(),
+            comp_dir: None,
+            producer: None,
+            language: None,
+            ranges,
+            functions,
+            variables: Vec::new(),
+            debug_info_range: 0..0,
+            debug_abbrev_range: 0..0,
+            debug_line_range: None,
+            file_name: Some(file_name),
+        });
+    }
+    if missing > 0 {
+        tracing::warn!("{missing} symbols in the grouping file were not found in the binary");
+    }
+    Ok(delink_core::cu::CuIndex { units })
+}
+
 fn cmd_split(
     path: &Path,
     outdir: &Path,
     comdat: bool,
     dwarf: bool,
     per_function_sections: bool,
+    group_by: GroupBy,
+    objects_arg: Option<&Path>,
 ) -> Result<()> {
     let mmap = mmap_file(path)?;
     let binary = open_binary(&mmap, path)?;
-    tracing::info!("indexing DWARF…");
-    let idx = delink_core::cu::CuIndex::build(&binary)?;
+    tracing::info!(arch = %binary.arch, class = %binary.class, "loaded");
+
+    let (source_idx, symtab, source_label) = build_split_index(&binary, group_by)?;
+
+    // The resolver must see every function in the binary, not just the ones
+    // the (possibly edited) grouping selects.
     tracing::info!("building symbol resolver…");
-    let symbols = delink_core::symbols::GlobalSymbols::build(&binary, &idx)?;
+    let symbols = if source_label == "symtab" {
+        symtab.build_symbols(&binary, &source_idx)?
+    } else {
+        delink_core::symbols::GlobalSymbols::build(&binary, &source_idx)?
+    };
+
+    std::fs::create_dir_all(outdir).with_context(|| format!("create {}", outdir.display()))?;
+    let idx = match objects_arg {
+        Some(p) => {
+            let raw = std::fs::read_to_string(p)
+                .with_context(|| format!("read grouping file {}", p.display()))?;
+            let objects: ObjectsJson = serde_json::from_str(&raw)
+                .with_context(|| format!("parse grouping file {}", p.display()))?;
+            tracing::info!(
+                "regrouping into {} objects from {}",
+                objects.len(),
+                p.display()
+            );
+            regroup_index(&source_idx, &objects)?
+        }
+        None => {
+            let objects_path = outdir.join("objects.json");
+            let json = serde_json::to_string_pretty(&objects_json_from_index(&source_idx))
+                .context("serialize objects.json")?;
+            std::fs::write(&objects_path, json)
+                .with_context(|| format!("write {}", objects_path.display()))?;
+            tracing::info!("grouping ({source_label}) → {}", objects_path.display());
+            source_idx
+        }
+    };
+
     tracing::info!(
-        "emitting {} CUs in parallel",
+        "emitting {} objects in parallel",
         idx.units
             .iter()
             .filter(|u| u.functions.iter().any(|f| f.size > 0))
@@ -290,6 +511,9 @@ fn cmd_split(
         comdat,
         dwarf,
         per_function_sections,
+        // `.symtab` grouping is a reconstruction, so a `static` function can
+        // land in a different object from its callers.
+        source_label == "symtab",
     )?;
     let shared = outdir.join("__shared_data.o");
     let shared_stats = delink_emit::emit_shared_data(
@@ -303,25 +527,16 @@ fn cmd_split(
     let mut failures = 0usize;
     for o in &outcomes {
         match &o.result {
-            Ok(s) => {
-                total.text_bytes += s.text_bytes;
-                total.local_symbols += s.local_symbols;
-                total.undef_symbols += s.undef_symbols;
-                total.relocations += s.relocations;
-                total.unresolved_calls += s.unresolved_calls;
-                total.instructions += s.instructions;
-                total.adrp_seen += s.adrp_seen;
-                total.adrp_paired += s.adrp_paired;
-                total.adrp_unresolved += s.adrp_unresolved;
-            }
+            Ok(s) => total.accumulate(s),
             Err(e) => {
                 failures += 1;
                 tracing::warn!(cu = %o.cu_name, error = %e, "emit failed");
             }
         }
     }
+
     println!(
-        "split complete: {} CUs ({} failed)\n  {} bytes .text, {} instructions\n  {} local + {} undef symbols\n  {} relocs ({} unresolved calls, {} unresolved adrps of {})\n  shared data: rodata={} data={} data.rel.ro={} bss={}",
+        "split complete ({source_label} grouping): {} objects ({} failed)\n  {} bytes .text, {} instructions\n  {} local + {} undef symbols\n  {} relocs, {} unresolved calls",
         outcomes.len() - failures,
         failures,
         total.text_bytes,
@@ -330,12 +545,38 @@ fn cmd_split(
         total.undef_symbols,
         total.relocations,
         total.unresolved_calls,
-        total.adrp_unresolved,
-        total.adrp_seen,
+    );
+    match binary.arch {
+        delink_arch::Arch::Aarch64 => println!(
+            "  adrp: {} seen, {} paired, {} unresolved",
+            total.adrp_seen, total.adrp_paired, total.adrp_unresolved
+        ),
+        delink_arch::Arch::Arm => println!(
+            "  literal pools: {} loads, {} relocated, {} unresolved, {} outside the function",
+            total.pool_loads, total.pool_relocated, total.pool_unresolved, total.pool_out_of_range
+        ),
+    }
+    println!(
+        "  shared data: rodata={} data={} data.rel.ro={} data.rel.ro.local={} bss={}",
         shared_stats.rodata_bytes,
         shared_stats.data_bytes,
         shared_stats.data_rel_ro_bytes,
+        shared_stats.data_rel_ro_local_bytes,
         shared_stats.bss_bytes,
+    );
+    if shared_stats.arm_exidx_bytes > 0 {
+        println!(
+            "  unwind: .ARM.exidx={} bytes ({} relocs), .ARM.extab={} bytes",
+            shared_stats.arm_exidx_bytes, shared_stats.exidx_relocs, shared_stats.arm_extab_bytes,
+        );
+    }
+    println!(
+        "  dynamic relocs: {} relative + {} absolute + {} glob_dat translated; {} skipped, {} unresolved",
+        shared_stats.translated_relatives,
+        shared_stats.translated_abs64,
+        shared_stats.translated_glob_dat,
+        shared_stats.skipped_relocs,
+        shared_stats.unresolved_relocs,
     );
     Ok(())
 }
@@ -372,15 +613,21 @@ fn cmd_emit_shared(path: &Path, output: &Path) -> Result<()> {
 }
 
 fn cmd_readobj(path: &Path) -> Result<()> {
-    use object::read::elf::{ElfFile64, FileHeader};
-    use object::{Endianness, Object, ObjectSection, ObjectSymbol};
+    use object::{Object, ObjectSection, ObjectSymbol};
 
     let mmap = mmap_file(path)?;
-    let elf = ElfFile64::<Endianness>::parse(&mmap[..])
-        .with_context(|| format!("parse {}", path.display()))?;
-    let endian = elf.elf_header().endian()?;
-    let e_type = elf.elf_header().e_type(endian);
-    let e_machine = elf.elf_header().e_machine(endian);
+    let data = &mmap[..];
+    let elf = object::File::parse(data).with_context(|| format!("parse {}", path.display()))?;
+    // `object::File` erases the raw header fields; read the two we print.
+    let (e_type, e_machine) = if data.len() >= 20 && data[..4] == [0x7f, b'E', b'L', b'F'] {
+        (
+            u16::from_le_bytes(data[16..18].try_into().unwrap()),
+            u16::from_le_bytes(data[18..20].try_into().unwrap()),
+        )
+    } else {
+        (0, 0)
+    };
+    let arch = delink_arch::Arch::from_elf_machine(e_machine).unwrap_or(delink_arch::Arch::Aarch64);
 
     println!("ELF  e_type=0x{:x} e_machine=0x{:x}", e_type, e_machine);
     println!("\nSECTIONS");
@@ -432,7 +679,10 @@ fn cmd_readobj(path: &Path) -> Result<()> {
             };
             let flags = match rel.flags() {
                 object::RelocationFlags::Elf { r_type } => {
-                    format!("elf_type={}", aarch64_reloc_name(r_type))
+                    format!(
+                        "elf_type={}",
+                        delink_core::inspect::reloc_name(arch, r_type)
+                    )
                 }
                 other => format!("{:?}", other),
             };
@@ -446,31 +696,6 @@ fn cmd_readobj(path: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn aarch64_reloc_name(t: u32) -> String {
-    use object::elf::*;
-    let name = match t {
-        R_AARCH64_NONE => "R_AARCH64_NONE",
-        R_AARCH64_ABS64 => "R_AARCH64_ABS64",
-        R_AARCH64_ABS32 => "R_AARCH64_ABS32",
-        R_AARCH64_ABS16 => "R_AARCH64_ABS16",
-        R_AARCH64_PREL64 => "R_AARCH64_PREL64",
-        R_AARCH64_PREL32 => "R_AARCH64_PREL32",
-        R_AARCH64_CALL26 => "R_AARCH64_CALL26",
-        R_AARCH64_JUMP26 => "R_AARCH64_JUMP26",
-        R_AARCH64_ADR_PREL_PG_HI21 => "R_AARCH64_ADR_PREL_PG_HI21",
-        R_AARCH64_ADD_ABS_LO12_NC => "R_AARCH64_ADD_ABS_LO12_NC",
-        R_AARCH64_LDST8_ABS_LO12_NC => "R_AARCH64_LDST8_ABS_LO12_NC",
-        R_AARCH64_LDST16_ABS_LO12_NC => "R_AARCH64_LDST16_ABS_LO12_NC",
-        R_AARCH64_LDST32_ABS_LO12_NC => "R_AARCH64_LDST32_ABS_LO12_NC",
-        R_AARCH64_LDST64_ABS_LO12_NC => "R_AARCH64_LDST64_ABS_LO12_NC",
-        R_AARCH64_LDST128_ABS_LO12_NC => "R_AARCH64_LDST128_ABS_LO12_NC",
-        R_AARCH64_ADR_GOT_PAGE => "R_AARCH64_ADR_GOT_PAGE",
-        R_AARCH64_LD64_GOT_LO12_NC => "R_AARCH64_LD64_GOT_LO12_NC",
-        _ => return format!("R_AARCH64_{t}"),
-    };
-    name.to_string()
 }
 
 fn open_binary<'a>(mmap: &'a memmap2::Mmap, path: &Path) -> Result<delink_core::Binary<'a>> {
@@ -528,6 +753,7 @@ fn cmd_emit(
             comdat,
             dwarf,
             per_function_sections,
+            promote_locals: false,
         },
         output,
     )?;

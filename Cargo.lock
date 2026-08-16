@@ -206,6 +206,18 @@ name = "delink-arch"
 version = "0.15.0"
 dependencies = [
  "anyhow",
+ "object",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "delink-arm"
+version = "0.15.0"
+dependencies = [
+ "anyhow",
+ "capstone",
+ "delink-arch",
  "delink-core",
  "object",
  "thiserror",
@@ -218,6 +230,7 @@ version = "0.15.0"
 dependencies = [
  "anyhow",
  "clap",
+ "delink-arch",
  "delink-core",
  "delink-emit",
  "delink-ida",
@@ -235,6 +248,7 @@ name = "delink-core"
 version = "0.15.0"
 dependencies = [
  "anyhow",
+ "delink-arch",
  "gimli",
  "memmap2",
  "object",
@@ -249,6 +263,7 @@ dependencies = [
  "anyhow",
  "delink-aarch64",
  "delink-arch",
+ "delink-arm",
  "delink-core",
  "memmap2",
  "object",

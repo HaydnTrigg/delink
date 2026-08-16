@@ -13,3 +13,4 @@ tracing.workspace = true
 memmap2.workspace = true
 object.workspace = true
 gimli.workspace = true
+delink-arch.workspace = true

@@ -3,12 +3,19 @@
 use crate::binary::Binary;
 use crate::cu::CuIndex;
 use crate::error::Result;
-use object::read::elf::SectionHeader as _;
-use object::{Endianness, Object as _, ObjectSection as _};
+use crate::symtab::SymtabIndex;
+use delink_arch::Arch;
+use object::{Object as _, ObjectSection as _};
 use std::fmt::Write as _;
 
 pub struct InspectReport {
     pub arch: String,
+    pub class: String,
+    /// Recovered `STT_FILE` translation units, and how many carry a usable
+    /// `.text` anchor.
+    pub symtab_files: usize,
+    pub symtab_anchored: usize,
+    pub symtab_functions: usize,
     pub sections: Vec<SectionRow>,
     pub dyn_relocs: Vec<(String, usize)>,
     pub cu_rows: Vec<CuRow>,
@@ -34,7 +41,8 @@ pub struct CuRow {
 }
 
 pub fn inspect(binary: &Binary<'_>) -> Result<InspectReport> {
-    let arch = "aarch64".to_string();
+    let arch = binary.arch.to_string();
+    let class = binary.class.to_string();
     let has_dwarf = binary.has_dwarf();
 
     let mut sections = Vec::new();
@@ -72,8 +80,17 @@ pub fn inspect(binary: &Binary<'_>) -> Result<InspectReport> {
         (Vec::new(), 0, 0)
     };
 
+    let symtab = SymtabIndex::build(binary)?;
+    let symtab_files = symtab.groups.len();
+    let symtab_anchored = symtab.groups.iter().filter(|g| g.anchor.is_some()).count();
+    let symtab_functions = symtab.text_functions().len();
+
     Ok(InspectReport {
         arch,
+        class,
+        symtab_files,
+        symtab_anchored,
+        symtab_functions,
         sections,
         dyn_relocs,
         cu_rows,
@@ -86,36 +103,56 @@ pub fn inspect(binary: &Binary<'_>) -> Result<InspectReport> {
 fn count_dyn_relocs(binary: &Binary<'_>) -> Vec<(String, usize)> {
     use std::collections::BTreeMap;
     let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
-    let endian = Endianness::Little;
-    for section in binary.elf.sections() {
-        let name = section.name().unwrap_or("");
-        if !name.starts_with(".rela.") && !name.starts_with(".rel.") {
-            continue;
-        }
-        let Ok(data) = section.data() else { continue };
-        let sh = section.elf_section_header();
-        let entsize = sh.sh_entsize(endian);
-        if entsize == 0 {
-            continue;
-        }
-        let entry_count = data.len() as u64 / entsize;
-        for i in 0..entry_count {
-            let off = (i * entsize) as usize;
-            let r_info = read_u64(&data[off + 8..off + 16]);
-            let r_type = (r_info & 0xffff_ffff) as u32;
-            *counts.entry(r_type).or_default() += 1;
-        }
+    let Ok(relocs) = crate::symbols::read_all_dyn_relocs(binary) else {
+        return Vec::new();
+    };
+    for rel in &relocs {
+        *counts.entry(rel.r_type).or_default() += 1;
     }
     counts
         .into_iter()
-        .map(|(k, v)| (aarch64_reloc_name(k), v))
+        .map(|(k, v)| (reloc_name(binary.arch, k), v))
         .collect()
 }
 
-fn read_u64(b: &[u8]) -> u64 {
-    let mut arr = [0u8; 8];
-    arr.copy_from_slice(&b[..8]);
-    u64::from_le_bytes(arr)
+/// Human-readable name for a relocation type.
+pub fn reloc_name(arch: Arch, t: u32) -> String {
+    match arch {
+        Arch::Aarch64 => aarch64_reloc_name(t),
+        Arch::Arm => arm_reloc_name(t),
+    }
+}
+
+fn arm_reloc_name(t: u32) -> String {
+    use object::elf::*;
+    let name = match t {
+        R_ARM_NONE => "R_ARM_NONE",
+        R_ARM_ABS32 => "R_ARM_ABS32",
+        R_ARM_REL32 => "R_ARM_REL32",
+        R_ARM_THM_PC22 => "R_ARM_THM_CALL",
+        R_ARM_GLOB_DAT => "R_ARM_GLOB_DAT",
+        R_ARM_JUMP_SLOT => "R_ARM_JUMP_SLOT",
+        R_ARM_RELATIVE => "R_ARM_RELATIVE",
+        R_ARM_GOTOFF => "R_ARM_GOTOFF32",
+        R_ARM_GOTPC => "R_ARM_BASE_PREL",
+        R_ARM_GOT32 => "R_ARM_GOT_BREL",
+        R_ARM_PLT32 => "R_ARM_PLT32",
+        R_ARM_CALL => "R_ARM_CALL",
+        R_ARM_JUMP24 => "R_ARM_JUMP24",
+        R_ARM_THM_JUMP24 => "R_ARM_THM_JUMP24",
+        R_ARM_TARGET1 => "R_ARM_TARGET1",
+        R_ARM_PREL31 => "R_ARM_PREL31",
+        R_ARM_MOVW_ABS_NC => "R_ARM_MOVW_ABS_NC",
+        R_ARM_MOVT_ABS => "R_ARM_MOVT_ABS",
+        R_ARM_GOT_PREL => "R_ARM_GOT_PREL",
+        R_ARM_COPY => "R_ARM_COPY",
+        R_ARM_IRELATIVE => "R_ARM_IRELATIVE",
+        R_ARM_TLS_DTPMOD32 => "R_ARM_TLS_DTPMOD32",
+        R_ARM_TLS_DTPOFF32 => "R_ARM_TLS_DTPOFF32",
+        R_ARM_TLS_TPOFF32 => "R_ARM_TLS_TPOFF32",
+        _ => return format!("R_ARM_{t}"),
+    };
+    name.to_string()
 }
 
 fn aarch64_reloc_name(t: u32) -> String {
@@ -150,11 +187,17 @@ fn aarch64_reloc_name(t: u32) -> String {
 
 pub fn format_text(r: &InspectReport) -> String {
     let mut out = String::new();
-    writeln!(out, "arch: {}", r.arch).unwrap();
+    writeln!(out, "arch: {} ({})", r.arch, r.class).unwrap();
     writeln!(
         out,
         "dwarf: {}",
         if r.has_dwarf { "present" } else { "MISSING" }
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "symtab: {} STT_FILE units ({} with a .text anchor), {} sized functions in .text",
+        r.symtab_files, r.symtab_anchored, r.symtab_functions
     )
     .unwrap();
     writeln!(out).unwrap();

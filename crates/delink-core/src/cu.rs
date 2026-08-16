@@ -26,6 +26,9 @@ pub struct CompilationUnit {
     pub debug_abbrev_range: Range<usize>,
     /// Byte range of this CU's line program in `.debug_line`, if present.
     pub debug_line_range: Option<Range<usize>>,
+    /// Output file name to use verbatim, when the caller supplied one (an
+    /// edited grouping file). `None` means derive it from `id` and `name`.
+    pub file_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +167,7 @@ fn build_unit<'a>(
         debug_info_range,
         debug_abbrev_range,
         debug_line_range,
+        file_name: None,
     }))
 }
 

@@ -3,6 +3,7 @@ pub mod cu;
 pub mod error;
 pub mod inspect;
 pub mod symbols;
+pub mod symtab;
 
 pub use binary::Binary;
 pub use error::Error;

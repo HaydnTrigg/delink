@@ -1,5 +1,5 @@
 [package]
-name = "delink-arch"
+name = "delink-arm"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,3 +11,6 @@ anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 object.workspace = true
+capstone.workspace = true
+delink-core.workspace = true
+delink-arch.workspace = true
