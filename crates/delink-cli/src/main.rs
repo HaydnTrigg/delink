@@ -135,6 +135,15 @@ enum Cmd {
         /// Rewrite `rep ret` (F3 C3) to a plain `ret` (C3) in emitted code.
         #[arg(long)]
         replace_rep_ret: bool,
+        /// Give symbols that share a name inside one object a unique `_<index>`
+        /// suffix on every occurrence after the first.
+        ///
+        /// A PDB module can declare several distinct symbols under one name --
+        /// most often compiler-generated funclets such as
+        /// `` `c_foo::c_foo'::`1'::dtor$0 ``, one per EH state.  Off by default,
+        /// so names are emitted exactly as the PDB spells them.
+        #[arg(long)]
+        deduplicate: bool,
     },
 
     // -----------------------------------------------------------------------
@@ -277,7 +286,8 @@ fn main() -> Result<()> {
             pdb,
             outdir,
             replace_rep_ret,
-        } => cmd_pe_split(&input, &pdb, &outdir, replace_rep_ret),
+            deduplicate,
+        } => cmd_pe_split(&input, &pdb, &outdir, replace_rep_ret, deduplicate),
         Cmd::MachoInspect { input } => cmd_macho_inspect(&input),
         Cmd::MachoListCus {
             input,
@@ -1217,6 +1227,7 @@ fn cmd_pe_split(
     pdb_path: &Path,
     outdir: &Path,
     replace_rep_ret: bool,
+    deduplicate: bool,
 ) -> Result<()> {
     let pe = load_pe_context(exe_path, pdb_path)?;
 
@@ -1229,11 +1240,11 @@ fn cmd_pe_split(
             .count()
     );
 
-    let outcomes = delink_pe::emit::split_all_pe(&pe, outdir, replace_rep_ret)?;
+    let outcomes = delink_pe::emit::split_all_pe(&pe, outdir, replace_rep_ret, deduplicate)?;
 
     let shared = outdir.join("__shared_data.obj");
     tracing::info!("emitting shared data → {}", shared.display());
-    let shared_stats = delink_pe::emit::emit_pe_shared(&pe, &shared)?;
+    let shared_stats = delink_pe::emit::emit_pe_shared(&pe, &shared, deduplicate)?;
 
     let mut total = delink_pe::emit::EmitStats::default();
     let mut failures = 0usize;

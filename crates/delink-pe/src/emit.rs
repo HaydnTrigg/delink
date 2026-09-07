@@ -67,6 +67,54 @@ fn remap_after_strip(off: u64, f3_offsets: &[u64]) -> u64 {
     off - f3_offsets.iter().filter(|&&p| p < off).count() as u64
 }
 
+/// Assigns unique COFF symbol names within a single object file.
+///
+/// A PDB module can declare several distinct symbols under one name, most
+/// commonly compiler-generated funclets such as
+/// `` `c_foo::c_foo'::`1'::dtor$0 ``, which appear once per EH state. The first
+/// symbol of a given name keeps it; every later one gains a `_<index>` suffix
+/// (`name_1`, `name_2`, ...). When disabled every name is emitted exactly as
+/// the PDB spells it, duplicates included.
+struct NameDeduper {
+    enabled: bool,
+    used: HashMap<String, usize>,
+}
+
+impl NameDeduper {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            used: HashMap::new(),
+        }
+    }
+
+    /// Return the name to emit for `name` and record that it is now taken.
+    fn unique(&mut self, name: &str) -> String {
+        if !self.enabled {
+            return name.to_string();
+        }
+        let seen = {
+            let count = self.used.entry(name.to_string()).or_insert(0);
+            *count += 1;
+            *count
+        };
+        if seen == 1 {
+            return name.to_string();
+        }
+        // Keep raising the index until the suffixed name is itself free, so a
+        // generated `name_1` cannot collide with a literal `name_1` from the PDB.
+        let mut index = seen - 1;
+        loop {
+            let candidate = format!("{name}_{index}");
+            if !self.used.contains_key(&candidate) {
+                self.used.insert(candidate.clone(), 1);
+                return candidate;
+            }
+            index += 1;
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct EmitStats {
     pub text_bytes: u64,
@@ -102,11 +150,17 @@ pub struct CuOutcome {
 /// When `replace_rep_ret` is set, each `rep ret` (`F3 C3`) in a function body is
 /// rewritten to a plain `ret` (`C3`) by dropping the redundant `F3` prefix, and
 /// all relocation / label / jump-table offsets past it are shifted accordingly.
+///
+/// When `deduplicate` is set, defined symbols that would share a name inside
+/// this object get a `_<index>` suffix on every occurrence after the first (see
+/// [`NameDeduper`]). Undefined externs are never renamed: their names are what
+/// the relink resolves against.
 pub fn emit_pe_cu(
     pe: &PeContext,
     cu: &PeCompilationUnit,
     out_path: &Path,
     replace_rep_ret: bool,
+    deduplicate: bool,
 ) -> Result<EmitStats> {
     let text_section = pe
         .sections
@@ -142,6 +196,7 @@ pub fn emit_pe_cu(
     }
     let mut local_syms: HashMap<String, SymbolId> = HashMap::new();
     let mut undef_cache: HashMap<String, SymbolId> = HashMap::new();
+    let mut dedup = NameDeduper::new(deduplicate);
     let mut total_text_bytes = 0u64;
     let mut total_relocs = 0usize;
     let mut total_instructions = 0usize;
@@ -238,7 +293,7 @@ pub fn emit_pe_cu(
                     SymbolScope::Compilation
                 };
                 let sym_id = obj.add_symbol(Symbol {
-                    name: sanitize_symbol_name(&f.name),
+                    name: sanitize_symbol_name(&dedup.unique(&f.name)),
                     value: fn_offset,
                     size: out_bytes.len() as u64,
                     kind: SymbolKind::Text,
@@ -251,6 +306,7 @@ pub fn emit_pe_cu(
                 emit_alias_symbols(
                     &mut obj,
                     &mut local_syms,
+                    &mut dedup,
                     f,
                     sid,
                     fn_offset,
@@ -268,7 +324,7 @@ pub fn emit_pe_cu(
                         SymbolScope::Compilation
                     };
                     let label_id = obj.add_symbol(Symbol {
-                        name: sanitize_symbol_name(&var.name),
+                        name: sanitize_symbol_name(&dedup.unique(&var.name)),
                         value: fn_offset + remap_after_strip(var_va - f.va, &f3),
                         size: 0,
                         kind: SymbolKind::Label,
@@ -301,7 +357,7 @@ pub fn emit_pe_cu(
                 // objdiff (which otherwise disassembles the table as trailing code).
                 for jt in &recovery.jump_tables {
                     let jt_id = obj.add_symbol(Symbol {
-                        name: sanitize_symbol_name(&jt.name),
+                        name: sanitize_symbol_name(&dedup.unique(&jt.name)),
                         value: fn_offset + remap_after_strip(jt.offset, &f3),
                         size: jt.entry_count * 4,
                         kind: SymbolKind::Data,
@@ -399,7 +455,7 @@ pub fn emit_pe_cu(
                     SymbolScope::Compilation
                 };
                 let sym_id = obj.add_symbol(Symbol {
-                    name: sanitize_symbol_name(&f.name),
+                    name: sanitize_symbol_name(&dedup.unique(&f.name)),
                     value: fn_offset,
                     size: out_bytes.len() as u64,
                     kind: SymbolKind::Text,
@@ -412,6 +468,7 @@ pub fn emit_pe_cu(
                 emit_alias_symbols(
                     &mut obj,
                     &mut local_syms,
+                    &mut dedup,
                     f,
                     sid,
                     fn_offset,
@@ -429,7 +486,7 @@ pub fn emit_pe_cu(
                         SymbolScope::Compilation
                     };
                     let label_id = obj.add_symbol(Symbol {
-                        name: sanitize_symbol_name(&var.name),
+                        name: sanitize_symbol_name(&dedup.unique(&var.name)),
                         value: fn_offset + remap_after_strip(var_va - f.va, &f3),
                         size: 0,
                         kind: SymbolKind::Label,
@@ -590,7 +647,7 @@ pub fn emit_pe_cu(
                 SymbolScope::Compilation
             };
             obj.add_symbol(Symbol {
-                name: sanitize_symbol_name(&var.name),
+                name: sanitize_symbol_name(&dedup.unique(&var.name)),
                 value: offset,
                 size: 0,
                 kind: SymbolKind::Data,
@@ -623,7 +680,14 @@ pub fn emit_pe_cu(
 /// Emit `__shared_data.obj` carrying `.rdata`, `.data`, `.bss` from the PE,
 /// with absolute-pointer relocations for all applicable base-reloc entries
 /// that land in those sections.
-pub fn emit_pe_shared(pe: &PeContext, out_path: &Path) -> Result<SharedDataStats> {
+///
+/// `deduplicate` behaves as in [`emit_pe_cu`]: repeated variable names are
+/// suffixed with `_<index>` after their first use.
+pub fn emit_pe_shared(
+    pe: &PeContext,
+    out_path: &Path,
+    deduplicate: bool,
+) -> Result<SharedDataStats> {
     let coff_arch = match pe.arch {
         PeArch::X86_64 => Architecture::X86_64,
         PeArch::X86 => Architecture::I386,
@@ -633,6 +697,7 @@ pub fn emit_pe_shared(pe: &PeContext, out_path: &Path) -> Result<SharedDataStats
         obj.set_mangling(Mangling::Coff);
     }
     let mut undef_cache: HashMap<String, SymbolId> = HashMap::new();
+    let mut dedup = NameDeduper::new(deduplicate);
     let mut stats = SharedDataStats::default();
 
     struct Slot {
@@ -786,7 +851,7 @@ pub fn emit_pe_shared(pe: &PeContext, out_path: &Path) -> Result<SharedDataStats
             SymbolScope::Compilation
         };
         obj.add_symbol(Symbol {
-            name: sanitize_symbol_name(&var.name),
+            name: sanitize_symbol_name(&dedup.unique(&var.name)),
             value: section_offset,
             size: 0,
             kind: SymbolKind::Data,
@@ -810,6 +875,7 @@ pub fn split_all_pe(
     pe: &PeContext,
     out_dir: &Path,
     replace_rep_ret: bool,
+    deduplicate: bool,
 ) -> Result<Vec<CuOutcome>> {
     std::fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
 
@@ -830,7 +896,8 @@ pub fn split_all_pe(
         .map(|cu| {
             let stem = sanitize_file_stem(&cu.name);
             let file = out_dir.join(format!("{:04}_{stem}.obj", cu.id));
-            let result = emit_pe_cu(pe, cu, &file, replace_rep_ret).map_err(|e| format!("{e:#}"));
+            let result = emit_pe_cu(pe, cu, &file, replace_rep_ret, deduplicate)
+                .map_err(|e| format!("{e:#}"));
             CuOutcome {
                 cu_name: cu.name.clone(),
                 file,
@@ -865,6 +932,7 @@ fn resolve_symbol(
 fn emit_alias_symbols(
     obj: &mut Object,
     local_syms: &mut HashMap<String, SymbolId>,
+    dedup: &mut NameDeduper,
     f: &PeFunction,
     sid: SectionId,
     fn_offset: u64,
@@ -875,7 +943,7 @@ fn emit_alias_symbols(
             continue;
         }
         let id = obj.add_symbol(Symbol {
-            name: sanitize_symbol_name(alias),
+            name: sanitize_symbol_name(&dedup.unique(alias)),
             value: fn_offset,
             size,
             kind: SymbolKind::Text,
@@ -935,4 +1003,47 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
         std::fs::create_dir_all(parent).ok();
     }
     std::fs::write(path, bytes).with_context(|| format!("write {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_deduper_leaves_every_name_alone() {
+        let mut d = NameDeduper::new(false);
+        let name = "`c_foo::c_foo'::`1'::dtor$0";
+        for _ in 0..4 {
+            assert_eq!(d.unique(name), name);
+        }
+    }
+
+    #[test]
+    fn first_name_is_kept_and_later_ones_are_indexed() {
+        let mut d = NameDeduper::new(true);
+        let name = "`c_foo::c_foo'::`1'::dtor$0";
+        assert_eq!(d.unique(name), name);
+        assert_eq!(d.unique(name), format!("{name}_1"));
+        assert_eq!(d.unique(name), format!("{name}_2"));
+        assert_eq!(d.unique(name), format!("{name}_3"));
+    }
+
+    #[test]
+    fn distinct_names_are_counted_independently() {
+        let mut d = NameDeduper::new(true);
+        assert_eq!(d.unique("a"), "a");
+        assert_eq!(d.unique("b"), "b");
+        assert_eq!(d.unique("a"), "a_1");
+        assert_eq!(d.unique("b"), "b_1");
+    }
+
+    #[test]
+    fn generated_suffix_skips_a_name_the_pdb_already_used() {
+        let mut d = NameDeduper::new(true);
+        assert_eq!(d.unique("sym"), "sym");
+        // A real `sym_1` claims that spelling first...
+        assert_eq!(d.unique("sym_1"), "sym_1");
+        // ...so the second `sym` must step past it rather than collide.
+        assert_eq!(d.unique("sym"), "sym_2");
+    }
 }
