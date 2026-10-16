@@ -204,7 +204,7 @@ pub fn build_cu_index(
         let mut tls_pending: Vec<(u16, u32, String)> = Vec::new();
         let global_syms = pdb.global_symbols().context("PDB global symbols")?;
         let mut iter = global_syms.iter();
-        while let Some(sym) = iter.next()? {
+        while let Some(sym) = iter.next().context("global symbols")? {
             match sym.parse() {
                 Ok(pdb::SymbolData::Public(p)) => {
                     let name = p.name.to_string().into_owned();
@@ -227,7 +227,9 @@ pub fn build_cu_index(
                                 mangled_by_va.insert(va, name.clone());
                             }
                         }
-                        if p.function || p.code {
+                        // VC6 leaves the public flags at zero, so fall back to
+                        // whether the symbol sits in an executable section.
+                        if p.function || p.code || section_is_code(sections, va) {
                             public_code_by_va.insert(va, name);
                         } else {
                             public_data_by_va.insert(va, name);
@@ -259,7 +261,7 @@ pub fn build_cu_index(
         let mut sc_iter = dbi
             .section_contributions()
             .context("section contributions")?;
-        while let Some(sc) = sc_iter.next()? {
+        while let Some(sc) = sc_iter.next().context("section contributions")? {
             let Some(rva) = sc.offset.to_rva(&address_map) else {
                 continue;
             };
@@ -278,9 +280,13 @@ pub fn build_cu_index(
     let mut inlined_functions: BTreeSet<String> = BTreeSet::new();
     let mut cu_id = 0usize;
     let mut mod_index = 0usize;
+    let public_code_starts: BTreeMap<u64, String> = public_code_by_va
+        .iter()
+        .map(|(va, name)| (*va, name.clone()))
+        .collect();
 
     let mut mod_iter = dbi.modules().context("PDB modules")?;
-    while let Some(module) = mod_iter.next()? {
+    while let Some(module) = mod_iter.next().context("PDB modules")? {
         let mod_name = module.module_name().to_string();
         let obj_file = module.object_file_name().to_string();
 
@@ -291,7 +297,7 @@ pub fn build_cu_index(
             // `S_FRAMEPROC` record that follows it can be attributed correctly.
             let mut current_proc_name: Option<String> = None;
             let mut sym_iter = mod_info.symbols().context("module symbols")?;
-            while let Some(sym) = sym_iter.next()? {
+            while let Some(sym) = sym_iter.next().context("module symbols")? {
                 // `S_FRAMEPROC` isn't parsed by the `pdb` crate; read its flags
                 // from the raw record and mark the enclosing procedure inline.
                 if sym.raw_kind() == S_FRAMEPROC {
@@ -408,6 +414,18 @@ pub fn build_cu_index(
             })
             .unwrap_or_default();
 
+        if functions.is_empty() {
+            functions = functions_from_contributions(
+                &contributions,
+                &public_code_starts,
+                &public_aliases_by_va,
+                cu_id,
+            );
+            for f in &functions {
+                all_functions.entry(f.va).or_insert_with(|| f.clone());
+            }
+        }
+
         // Only keep modules that have code or data contributions.
         if !functions.is_empty() || !contributions.is_empty() {
             units.push(PeCompilationUnit {
@@ -450,6 +468,57 @@ pub fn build_cu_index(
         code_publics,
         inlined_functions.into_iter().collect(),
     ))
+}
+
+/// `IMAGE_SCN_CNT_CODE` | `IMAGE_SCN_MEM_EXECUTE`.
+const SECTION_CODE: u32 = 0x0000_0020 | 0x2000_0000;
+
+fn section_is_code(sections: &[PeSection], va: u64) -> bool {
+    sections
+        .iter()
+        .any(|s| s.contains_va(va) && s.characteristics & SECTION_CODE != 0)
+}
+
+/// Functions of a module whose symbol stream has no procedure records, which is
+/// what a module compiled without full debug info looks like (e.g. the VC6-era
+/// Xbox build of the Halo beta).
+///
+/// Every `.text` contribution starts a function (function-level linking gives
+/// each function its own), and so does every public code symbol inside one. A
+/// function runs to the next start or to the end of its contribution. A start
+/// with no public name is a file-static function and is named `_sub_<VA>`.
+fn functions_from_contributions(
+    contributions: &[PeContrib],
+    public_code: &BTreeMap<u64, String>,
+    aliases: &HashMap<u64, Vec<String>>,
+    module_id: usize,
+) -> Vec<PeFunction> {
+    let mut functions = Vec::new();
+    for c in contributions
+        .iter()
+        .filter(|c| c.section_name == ".text" && c.size > 0)
+    {
+        let end = c.va + c.size as u64;
+        let starts: Vec<u64> = std::iter::once(c.va)
+            .chain(public_code.range(c.va + 1..end).map(|(va, _)| *va))
+            .collect();
+        for (i, &va) in starts.iter().enumerate() {
+            let next = starts.get(i + 1).copied().unwrap_or(end);
+            let (name, is_public) = match public_code.get(&va) {
+                Some(name) => (name.clone(), true),
+                None => (format!("_sub_{va:08X}"), false),
+            };
+            functions.push(PeFunction {
+                name,
+                va,
+                size: (next - va) as u32,
+                is_public,
+                module_id,
+                aliases: aliases.get(&va).cloned().unwrap_or_default(),
+            });
+        }
+    }
+    functions
 }
 
 fn section_name_for_va(sections: &[PeSection], va: u64) -> String {

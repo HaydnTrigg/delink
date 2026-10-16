@@ -9,6 +9,7 @@ use std::collections::HashMap;
 pub mod cu;
 pub mod emit;
 pub mod mangle;
+pub mod msf;
 pub mod symbols;
 
 pub use cu::{PeCompilationUnit, PeContrib, PeCuIndex, PeFunction, PeVariable};
@@ -122,6 +123,15 @@ pub fn load_pe_and_pdb(exe_data: &[u8], pdb_data: &[u8]) -> Result<PeContext> {
     let (arch, image_base, sections) = parse_pe_sections(exe_data)?;
     let base_relocations = parse_base_relocations(&sections, image_base);
     let imports = parse_imports(exe_data, &sections, image_base, arch);
+
+    let upgraded;
+    let pdb_data = if msf::is_small_msf(pdb_data) {
+        tracing::info!("PDB is a small MSF (PDB 2.00); re-packing it as MSF 7.00");
+        upgraded = msf::small_msf_to_big(pdb_data)?;
+        &upgraded[..]
+    } else {
+        pdb_data
+    };
 
     let (cu_index, all_functions, all_variables, tls_variables, code_publics, inlined_functions) =
         cu::build_cu_index(pdb_data, image_base, &sections, arch)?;
