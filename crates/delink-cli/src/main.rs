@@ -3,15 +3,26 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Where `split` gets its compilation-unit boundaries.
+/// Where a split gets its compilation-unit boundaries when there is no PDB.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum GroupBy {
-    /// DWARF if it covers more `.text` than `.symtab` does, else `.symtab`.
+    /// DWARF if it covers more code than the symbol table does, else the
+    /// symbol table.
     Auto,
     /// DWARF compilation units only.
     Dwarf,
-    /// `.symtab` `STT_FILE` translation units only.
+    /// Symbol-table translation units only: ELF `STT_FILE` / COFF `.file`.
     Symtab,
+}
+
+impl From<GroupBy> for delink_pe::DebugSource {
+    fn from(g: GroupBy) -> Self {
+        match g {
+            GroupBy::Auto => Self::Auto,
+            GroupBy::Dwarf => Self::Dwarf,
+            GroupBy::Symtab => Self::Symtab,
+        }
+    }
 }
 
 /// The editable grouping file: output `.o` name → the function symbols it
@@ -106,29 +117,47 @@ enum Cmd {
     PeInspect {
         /// Path to the PE executable (.exe or .dll).
         input: PathBuf,
-        /// Path to the matching PDB file.
+        /// Path to the matching PDB file. Without one, the image's own DWARF /
+        /// COFF symbols are used.
         #[arg(long)]
-        pdb: PathBuf,
+        pdb: Option<PathBuf>,
+        /// Which embedded debug info to use when there is no PDB.
+        #[arg(long, value_enum, default_value_t = GroupBy::Auto)]
+        group_by: GroupBy,
     },
 
     /// List PDB modules (CUs) sorted by .text size.
     PeListCus {
         input: PathBuf,
+        /// Path to the matching PDB file. Without one, the image's own DWARF /
+        /// COFF symbols are used.
         #[arg(long)]
-        pdb: PathBuf,
+        pdb: Option<PathBuf>,
+        /// Which embedded debug info to use when there is no PDB.
+        #[arg(long, value_enum, default_value_t = GroupBy::Auto)]
+        group_by: GroupBy,
         #[arg(long, default_value = "")]
         contains: String,
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
 
-    /// Split a PE + PDB into one COFF `.obj` per module plus `__shared_data.obj`.
+    /// Split a PE into one COFF `.obj` per module plus `__shared_data.obj`.
+    ///
+    /// Modules come from the PDB when `--pdb` is given. Without one (images
+    /// built by MinGW, say, which have no PDB) they come from debug info
+    /// embedded in the image: DWARF if present, or the COFF symbol table's
+    /// `.file` records.
     PeSplit {
         /// Path to the PE executable (.exe or .dll).
         input: PathBuf,
-        /// Path to the matching PDB file.
+        /// Path to the matching PDB file. Optional: without it the image's own
+        /// DWARF / COFF symbols are used.
         #[arg(long)]
-        pdb: PathBuf,
+        pdb: Option<PathBuf>,
+        /// Which embedded debug info to use when there is no PDB.
+        #[arg(long, value_enum, default_value_t = GroupBy::Auto)]
+        group_by: GroupBy,
         /// Output directory for the `.obj` files.
         #[arg(short, long)]
         outdir: PathBuf,
@@ -274,20 +303,33 @@ fn main() -> Result<()> {
             group_by,
             objects.as_deref(),
         ),
-        Cmd::PeInspect { input, pdb } => cmd_pe_inspect(&input, &pdb),
+        Cmd::PeInspect {
+            input,
+            pdb,
+            group_by,
+        } => cmd_pe_inspect(&input, pdb.as_deref(), group_by),
         Cmd::PeListCus {
             input,
             pdb,
+            group_by,
             contains,
             limit,
-        } => cmd_pe_list_cus(&input, &pdb, &contains, limit),
+        } => cmd_pe_list_cus(&input, pdb.as_deref(), group_by, &contains, limit),
         Cmd::PeSplit {
             input,
             pdb,
+            group_by,
             outdir,
             replace_rep_ret,
             deduplicate,
-        } => cmd_pe_split(&input, &pdb, &outdir, replace_rep_ret, deduplicate),
+        } => cmd_pe_split(
+            &input,
+            pdb.as_deref(),
+            group_by,
+            &outdir,
+            replace_rep_ret,
+            deduplicate,
+        ),
         Cmd::MachoInspect { input } => cmd_macho_inspect(&input),
         Cmd::MachoListCus {
             input,
@@ -813,9 +855,23 @@ fn cmd_list_cus(path: &Path, contains: &str, limit: usize) -> Result<()> {
 // PE + PDB subcommands
 // ---------------------------------------------------------------------------
 
-fn load_pe_context(exe_path: &Path, pdb_path: &Path) -> Result<delink_pe::PeContext> {
+/// Load a PE, from its PDB when one is given and otherwise from the debug info
+/// embedded in the image (DWARF and/or the COFF symbol table).
+fn load_pe_context(
+    exe_path: &Path,
+    pdb_path: Option<&Path>,
+    group_by: GroupBy,
+) -> Result<delink_pe::PeContext> {
     let exe_data =
         std::fs::read(exe_path).with_context(|| format!("read {}", exe_path.display()))?;
+    let Some(pdb_path) = pdb_path else {
+        tracing::info!(
+            "loaded PE ({} bytes); no --pdb given, looking for embedded debug info",
+            exe_data.len()
+        );
+        return delink_pe::load_pe_without_pdb(&exe_data, group_by.into())
+            .with_context(|| format!("load {}", exe_path.display()));
+    };
     let pdb_data =
         std::fs::read(pdb_path).with_context(|| format!("read {}", pdb_path.display()))?;
     tracing::info!(
@@ -827,8 +883,8 @@ fn load_pe_context(exe_path: &Path, pdb_path: &Path) -> Result<delink_pe::PeCont
         .with_context(|| format!("load {} + {}", exe_path.display(), pdb_path.display()))
 }
 
-fn cmd_pe_inspect(exe_path: &Path, pdb_path: &Path) -> Result<()> {
-    let pe = load_pe_context(exe_path, pdb_path)?;
+fn cmd_pe_inspect(exe_path: &Path, pdb_path: Option<&Path>, group_by: GroupBy) -> Result<()> {
+    let pe = load_pe_context(exe_path, pdb_path, group_by)?;
 
     println!("PE sections:");
     println!("  {:<16} {:>16} {:>12}  flags", "name", "VA", "size");
@@ -860,8 +916,14 @@ fn cmd_pe_inspect(exe_path: &Path, pdb_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_pe_list_cus(exe_path: &Path, pdb_path: &Path, contains: &str, limit: usize) -> Result<()> {
-    let pe = load_pe_context(exe_path, pdb_path)?;
+fn cmd_pe_list_cus(
+    exe_path: &Path,
+    pdb_path: Option<&Path>,
+    group_by: GroupBy,
+    contains: &str,
+    limit: usize,
+) -> Result<()> {
+    let pe = load_pe_context(exe_path, pdb_path, group_by)?;
 
     let mut rows: Vec<_> = pe
         .cu_index
@@ -1228,12 +1290,13 @@ fn cmd_macho_split(
 
 fn cmd_pe_split(
     exe_path: &Path,
-    pdb_path: &Path,
+    pdb_path: Option<&Path>,
+    group_by: GroupBy,
     outdir: &Path,
     replace_rep_ret: bool,
     deduplicate: bool,
 ) -> Result<()> {
-    let pe = load_pe_context(exe_path, pdb_path)?;
+    let pe = load_pe_context(exe_path, pdb_path, group_by)?;
 
     tracing::info!(
         "splitting {} CUs (modules with functions) in parallel",

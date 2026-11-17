@@ -1,18 +1,21 @@
-//! PE (.exe/.dll) + PDB loader for `delink`.
+//! PE (.exe/.dll) loader for `delink`.
 //!
 //! Supports both 64-bit (PE32+, machine AMD64) and 32-bit (PE32, machine I386)
-//! PE executables together with their PDB files.
+//! PE executables, driven by their PDB files or — for images built without
+//! one, such as MinGW's — by the DWARF / COFF symbols embedded in the image.
 
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 
 pub mod cu;
+pub mod embedded;
 pub mod emit;
 pub mod mangle;
 pub mod msf;
 pub mod symbols;
 
 pub use cu::{PeCompilationUnit, PeContrib, PeCuIndex, PeFunction, PeVariable};
+pub use embedded::DebugSource;
 pub use symbols::PeGlobalSymbols;
 
 /// Target architecture of the loaded PE.
@@ -157,6 +160,50 @@ pub fn load_pe_and_pdb(exe_data: &[u8], pdb_data: &[u8]) -> Result<PeContext> {
     })
 }
 
+/// Load a PE executable that has no PDB, taking its functions, compilation
+/// units and data symbols from debug info embedded in the image: DWARF in
+/// `.debug_*` sections and/or the COFF symbol table.
+///
+/// `source` picks which; [`DebugSource::Auto`] uses whichever covers more of
+/// `.text`.
+pub fn load_pe_without_pdb(exe_data: &[u8], source: DebugSource) -> Result<PeContext> {
+    let (arch, image_base, sections) = parse_pe_sections(exe_data)?;
+    let base_relocations = parse_base_relocations(&sections, image_base);
+    let imports = parse_imports(exe_data, &sections, image_base, arch);
+
+    let recovered = embedded::recover(exe_data, arch, image_base, &sections, source)?;
+    tracing::info!(
+        "no PDB: using {} ({} modules, {} functions, {} variables)",
+        recovered.label,
+        recovered.cu_index.units.len(),
+        recovered.functions.len(),
+        recovered.variables.len()
+    );
+    let mut symbols = symbols::PeGlobalSymbols::build(
+        recovered.functions,
+        recovered.variables,
+        recovered.tls_variables,
+        recovered.code_publics,
+        &imports,
+        &sections,
+        image_base,
+    );
+    // The PDB workflow names anonymous string literals the way MSVC would, for
+    // the recompiled objects to define. Nothing recompiled here defines them.
+    symbols.synthesize_string_literals = false;
+
+    Ok(PeContext {
+        arch,
+        image_base,
+        sections,
+        cu_index: recovered.cu_index,
+        symbols,
+        base_relocations,
+        imports,
+        inlined_functions: Vec::new(),
+    })
+}
+
 /// A PE image without debug info: just sections, image base, and the base
 /// relocation table.
 ///
@@ -273,6 +320,13 @@ fn parse_pe_sections(exe_data: &[u8]) -> Result<(PeArch, u64, Vec<PeSection>)> {
         return Err(anyhow!("section headers out of bounds"));
     }
 
+    // Section names longer than 8 bytes are stored as `/<decimal offset>` into
+    // the COFF string table, which follows the symbol table. GNU toolchains use
+    // this for every `.debug_*` section, so DWARF is invisible without it.
+    let symtab_ptr = u32::from_le_bytes(exe_data[coff_off + 8..coff_off + 12].try_into().unwrap());
+    let symtab_len = u32::from_le_bytes(exe_data[coff_off + 12..coff_off + 16].try_into().unwrap());
+    let string_table = (symtab_ptr != 0).then(|| symtab_ptr as usize + symtab_len as usize * 18);
+
     let mut sections = Vec::with_capacity(num_sections);
     for i in 0..num_sections {
         let hdr = &exe_data[sections_off + i * section_entry_size..];
@@ -280,6 +334,7 @@ fn parse_pe_sections(exe_data: &[u8]) -> Result<(PeArch, u64, Vec<PeSection>)> {
         let name = String::from_utf8_lossy(name_bytes)
             .trim_end_matches('\0')
             .to_string();
+        let name = resolve_long_section_name(exe_data, string_table, &name).unwrap_or(name);
 
         let virtual_size = u32::from_le_bytes(hdr[8..12].try_into().unwrap()) as u64;
         let virtual_address = u32::from_le_bytes(hdr[12..16].try_into().unwrap()) as u64;
@@ -301,6 +356,11 @@ fn parse_pe_sections(exe_data: &[u8]) -> Result<(PeArch, u64, Vec<PeSection>)> {
         };
         if (data.len() as u64) < virtual_size {
             data.resize(virtual_size as usize, 0);
+        } else if name.starts_with(".debug_") && virtual_size > 0 {
+            // Debug sections are padded out to the file alignment. DWARF
+            // readers walk `.debug_info` unit by unit, so the padding would
+            // read as a bogus trailing unit.
+            data.truncate(virtual_size as usize);
         }
 
         sections.push(PeSection {
@@ -314,6 +374,19 @@ fn parse_pe_sections(exe_data: &[u8]) -> Result<(PeArch, u64, Vec<PeSection>)> {
     }
 
     Ok((arch, image_base, sections))
+}
+
+/// Resolve a `/<offset>` section name through the COFF string table.
+fn resolve_long_section_name(
+    exe_data: &[u8],
+    string_table: Option<usize>,
+    name: &str,
+) -> Option<String> {
+    let offset: usize = name.strip_prefix('/')?.parse().ok()?;
+    let start = string_table?.checked_add(offset)?;
+    let bytes = exe_data.get(start..)?;
+    let end = bytes.iter().position(|&b| b == 0)?;
+    Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
 }
 
 // ---------------------------------------------------------------------------

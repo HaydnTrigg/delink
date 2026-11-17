@@ -30,6 +30,12 @@ pub struct PeGlobalSymbols {
     /// content by address and synthesize its MSVC `??_C@` decorated name when
     /// the PDB has no symbol for it (folded/anonymous string COMDATs).
     rdata: Option<(u64, Vec<u8>)>,
+    /// Name anonymous `.rdata` string literals after MSVC's `??_C@…` scheme.
+    ///
+    /// Right for a PDB-driven split, where the recompiled MSVC objects define
+    /// those names. Wrong for an image built by another toolchain (MinGW): no
+    /// object would define them, so they must stay section-relative.
+    pub synthesize_string_literals: bool,
 }
 
 impl PeGlobalSymbols {
@@ -67,6 +73,7 @@ impl PeGlobalSymbols {
             bss_range: section_range(".bss"),
             idata_range: section_range(".idata"),
             rdata,
+            synthesize_string_literals: true,
         }
     }
 
@@ -144,8 +151,10 @@ impl PeGlobalSymbols {
         // COMDATs carry no symbol record, so look the literal up by address and
         // synthesize the same `??_C@…` decorated name MSVC (and thus our own
         // recompiled object) produces for those bytes.
-        if let Some(name) = self.synthesize_string_symbol(va) {
-            return Some((name, 0));
+        if self.synthesize_string_literals {
+            if let Some(name) = self.synthesize_string_symbol(va) {
+                return Some((name, 0));
+            }
         }
         // Interior of an unsized data global (public-only symbol, forward-ref
         // template type): extend to the next variable, capped at the section

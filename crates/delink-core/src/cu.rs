@@ -55,7 +55,6 @@ pub struct CuIndex {
 impl CuIndex {
     pub fn build(binary: &Binary<'_>) -> Result<Self> {
         use object::{Object as _, ObjectSection as _};
-        let dwarf = &binary.dwarf;
         let abbrev_section: &[u8] = binary
             .elf
             .section_by_name(".debug_abbrev")
@@ -66,7 +65,19 @@ impl CuIndex {
             .section_by_name(".debug_line")
             .and_then(|s| s.data().ok())
             .unwrap_or(&[]);
+        Self::from_dwarf(&binary.dwarf, abbrev_section, line_section)
+    }
 
+    /// Index an already-loaded DWARF, for callers whose sections don't live in
+    /// an ELF (a PE image carries them under COFF long names).
+    ///
+    /// `abbrev_section` / `line_section` are the raw `.debug_abbrev` /
+    /// `.debug_line` bytes, used to report each CU's slice of them.
+    pub fn from_dwarf(
+        dwarf: &Dwarf<DwarfSlice<'_>>,
+        abbrev_section: &[u8],
+        line_section: &[u8],
+    ) -> Result<Self> {
         let mut units = Vec::new();
         let mut headers = dwarf.units();
         let mut cu_id = 0usize;

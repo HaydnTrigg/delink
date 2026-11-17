@@ -11,7 +11,9 @@ A splitting tool for decompilation projects.
 - Shared Object (.so) files, AArch64 and x86-64 (ELF64) and 32-bit ARM (ELF32),
   split by DWARF compilation units or by [`.symtab` translation units](#elf-splitting).
 - Mach-O STABS and SYMTAB
-- Windows PE with PDB's (.exe/.pdb).
+- Windows PE (.exe/.dll) with PDB's (`--pdb`). `--pdb` is optional: images
+  built without one (MinGW) are split from the DWARF and/or COFF symbol table
+  embedded in the image, whichever covers more code (`--group-by` overrides).
 - Any binary IDA can analyse, via the [IDA import](#ida-import) workflow.
 
 ## IDA import

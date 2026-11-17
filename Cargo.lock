@@ -307,8 +307,11 @@ name = "delink-pe"
 version = "0.18.0"
 dependencies = [
  "anyhow",
+ "delink-core",
  "delink-x86",
  "delink-x86_64",
+ "gimli",
+ "iced-x86",
  "object",
  "pdb",
  "rayon",
