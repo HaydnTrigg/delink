@@ -16,6 +16,7 @@ delink-core.workspace = true
 delink-arch.workspace = true
 delink-aarch64.workspace = true
 delink-arm.workspace = true
+delink-x86_64.workspace = true
 
 [dev-dependencies]
 memmap2.workspace = true

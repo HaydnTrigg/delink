@@ -565,6 +565,10 @@ fn cmd_split(
             "  literal pools: {} loads, {} relocated, {} unresolved, {} outside the function",
             total.pool_loads, total.pool_relocated, total.pool_unresolved, total.pool_out_of_range
         ),
+        delink_arch::Arch::X86_64 => println!(
+            "  rip-relative refs: {} seen, {} unresolved",
+            total.rip_refs, total.rip_refs_unresolved
+        ),
     }
     println!(
         "  shared data: rodata={} data={} data.rel.ro={} data.rel.ro.local={} bss={}",

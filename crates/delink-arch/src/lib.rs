@@ -1,4 +1,5 @@
-//! Architecture backend trait. Implemented for AArch64 (ELF64) and ARM (ELF32).
+//! Architecture backend trait. Implemented for AArch64 (ELF64), ARM (ELF32)
+//! and x86-64 (ELF64).
 
 use std::fmt;
 
@@ -7,6 +8,8 @@ pub enum Arch {
     Aarch64,
     /// 32-bit ARM (AArch32), A32 instruction set.
     Arm,
+    /// x86-64 (AMD64), System V ABI.
+    X86_64,
 }
 
 impl Arch {
@@ -15,6 +18,7 @@ impl Arch {
         match self {
             Arch::Aarch64 => 8,
             Arch::Arm => 4,
+            Arch::X86_64 => 8,
         }
     }
 
@@ -24,6 +28,7 @@ impl Arch {
         match self {
             Arch::Aarch64 => true,
             Arch::Arm => false,
+            Arch::X86_64 => true,
         }
     }
 
@@ -31,6 +36,7 @@ impl Arch {
         match e_machine {
             0xb7 => Some(Arch::Aarch64), // EM_AARCH64
             0x28 => Some(Arch::Arm),     // EM_ARM
+            0x3e => Some(Arch::X86_64),  // EM_X86_64
             _ => None,
         }
     }
@@ -41,6 +47,7 @@ impl fmt::Display for Arch {
         match self {
             Arch::Aarch64 => f.write_str("aarch64"),
             Arch::Arm => f.write_str("arm"),
+            Arch::X86_64 => f.write_str("x86_64"),
         }
     }
 }

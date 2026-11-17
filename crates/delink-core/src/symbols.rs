@@ -171,7 +171,15 @@ impl GlobalSymbols {
                 .map(|s| s.address()..s.address() + s.size())
         };
 
-        let plt_range = section_range(".plt");
+        // x86-64 splits its stubs across `.plt` (lazy), `.plt.sec` (IBT) and
+        // `.plt.got` (no lazy binding); calls can land in any of them.
+        let plt_range = if binary.arch == Arch::X86_64 {
+            [".plt", ".plt.sec", ".plt.got"]
+                .into_iter()
+                .fold(None, |acc, name| merge_ranges(acc, section_range(name)))
+        } else {
+            section_range(".plt")
+        };
         let got_range = merge_ranges(section_range(".got"), section_range(".got.plt"));
         let text_range = section_range(".text").unwrap_or(0..0);
         let rodata_range = section_range(".rodata");
@@ -411,6 +419,10 @@ fn build_plt_map(
         return Ok(map);
     };
 
+    if binary.arch == Arch::X86_64 {
+        return Ok(build_x86_64_plt_map(binary, dyn_relocs));
+    }
+
     // On ARM the PLT stub itself names the GOT slot it jumps through, so
     // decoding beats trusting the `.rel.plt` ordering. Fall back to index
     // order when a stub doesn't match the classic three-instruction shape.
@@ -446,6 +458,7 @@ fn build_plt_map(
     let (header, entry) = match binary.arch {
         Arch::Aarch64 => (AARCH64_PLT_HEADER_SIZE, AARCH64_PLT_ENTRY_SIZE),
         Arch::Arm => (ARM_PLT_HEADER_SIZE, ARM_PLT_ENTRY_SIZE),
+        Arch::X86_64 => unreachable!("x86-64 PLT handled above"),
     };
     let plt_relocs: Vec<&DynReloc> = dyn_relocs
         .iter()
@@ -524,7 +537,74 @@ fn is_relative_reloc(arch: Arch, r_type: u32) -> bool {
     match arch {
         Arch::Aarch64 => r_type == object::elf::R_AARCH64_RELATIVE.0,
         Arch::Arm => r_type == object::elf::R_ARM_RELATIVE.0,
+        Arch::X86_64 => r_type == object::elf::R_X86_64_RELATIVE.0,
     }
+}
+
+/// Name every x86-64 PLT stub by decoding the `jmp [rip+disp32]` it dispatches
+/// through and looking that GOT slot up among the dynamic relocations.
+///
+/// The three stub layouts share the indirect jump but differ in what precedes
+/// it, so each entry is probed for the optional `endbr64` and `bnd` prefix:
+///
+/// ```text
+///   .plt      (lazy)   ff 25 <disp32> ; push idx ; jmp plt0       16 bytes
+///   .plt.sec  (IBT)    endbr64 ; [bnd] ff 25 <disp32> ; nop       16 bytes
+///   .plt.got           ff 25 <disp32> ; nop                        8 bytes
+///                      endbr64 ; [bnd] ff 25 <disp32> ; nop       16 bytes (IBT)
+/// ```
+///
+/// The first 16 bytes of `.plt` are PLT0, whose `jmp` sits at +6 rather than
+/// at the entry start, so it never matches and is skipped.
+fn build_x86_64_plt_map(binary: &Binary<'_>, dyn_relocs: &[DynReloc]) -> HashMap<u64, String> {
+    let slot_names: HashMap<u64, &str> = dyn_relocs
+        .iter()
+        .filter(|r| !r.sym_name.is_empty())
+        .map(|r| (r.r_offset, r.sym_name.as_str()))
+        .collect();
+
+    let mut map = HashMap::new();
+    for name in [".plt", ".plt.sec", ".plt.got"] {
+        let Some(section) = binary.elf.section_by_name(name) else {
+            continue;
+        };
+        let Ok(data) = section.data() else { continue };
+        let base = section.address();
+        let ibt = data.starts_with(&ENDBR64);
+        let stride = if name == ".plt.got" && !ibt { 8 } else { 16 };
+        for (i, entry) in data.chunks(stride).enumerate() {
+            if let Some(slot) = x86_64_plt_entry_got_slot(entry, base + (i * stride) as u64) {
+                if let Some(sym) = slot_names.get(&slot) {
+                    map.insert(base + (i * stride) as u64, sym.to_string());
+                }
+            }
+        }
+    }
+    map
+}
+
+const ENDBR64: [u8; 4] = [0xf3, 0x0f, 0x1e, 0xfa];
+
+/// Decode one x86-64 PLT entry and return the GOT slot its indirect jump
+/// reads, or `None` when the entry doesn't open with that jump.
+fn x86_64_plt_entry_got_slot(entry: &[u8], stub_addr: u64) -> Option<u64> {
+    let mut at = 0usize;
+    if entry.starts_with(&ENDBR64) {
+        at += 4;
+    }
+    if entry.get(at) == Some(&0xf2) {
+        at += 1; // bnd
+    }
+    if entry.get(at..at + 2)? != [0xff, 0x25] {
+        return None;
+    }
+    let disp = i32::from_le_bytes(entry.get(at + 2..at + 6)?.try_into().ok()?);
+    // RIP-relative: the displacement is from the end of the jump.
+    Some(
+        stub_addr
+            .wrapping_add((at + 6) as u64)
+            .wrapping_add(disp as i64 as u64),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -711,6 +791,58 @@ mod tests {
         assert_eq!(arm_expand_imm12(0x601), 0x0010_0000);
         // 0xaa8: value 0xa8 rotated right by 20 -> 0x000a_8000.
         assert_eq!(arm_expand_imm12(0xaa8), 0x000a_8000);
+    }
+
+    /// Lazy-binding `.plt` entry: the indirect jump opens the stub.
+    #[test]
+    fn x86_64_lazy_plt_entry_decodes_to_its_got_slot() {
+        // jmp [rip+0x2fe2] ; push 0 ; jmp plt0
+        let entry = [
+            0xff, 0x25, 0xe2, 0x2f, 0x00, 0x00, 0x68, 0x00, 0x00, 0x00, 0x00, 0xe9, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        // RIP after the 6-byte jump is 0x1006.
+        assert_eq!(
+            x86_64_plt_entry_got_slot(&entry, 0x1000),
+            Some(0x1006 + 0x2fe2)
+        );
+    }
+
+    /// IBT `.plt.sec` entry: `endbr64` and a `bnd` prefix precede the jump.
+    #[test]
+    fn x86_64_ibt_plt_entry_skips_endbr_and_bnd() {
+        let entry = [
+            0xf3, 0x0f, 0x1e, 0xfa, 0xf2, 0xff, 0x25, 0x10, 0x00, 0x00, 0x00, 0x0f, 0x1f, 0x44,
+            0x00, 0x00,
+        ];
+        // endbr64 (4) + bnd (1) + jmp (6): RIP after the jump is 0x200b.
+        assert_eq!(
+            x86_64_plt_entry_got_slot(&entry, 0x2000),
+            Some(0x200b + 0x10)
+        );
+    }
+
+    /// A negative displacement walks backwards (GOT below the stubs).
+    #[test]
+    fn x86_64_plt_entry_handles_negative_displacement() {
+        let disp = (-0x100i32).to_le_bytes();
+        let entry = [0xff, 0x25, disp[0], disp[1], disp[2], disp[3], 0x66, 0x90];
+        assert_eq!(
+            x86_64_plt_entry_got_slot(&entry, 0x3000),
+            Some(0x3006 - 0x100)
+        );
+    }
+
+    /// PLT0 starts with `push [rip+..]`; its `jmp` is not at the entry start.
+    #[test]
+    fn x86_64_plt0_and_junk_decode_to_nothing() {
+        let plt0 = [
+            0xff, 0x35, 0x00, 0x00, 0x00, 0x00, 0xff, 0x25, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x1f,
+            0x40, 0x00,
+        ];
+        assert_eq!(x86_64_plt_entry_got_slot(&plt0, 0x1000), None);
+        assert_eq!(x86_64_plt_entry_got_slot(&[0u8; 16], 0x1000), None);
+        assert_eq!(x86_64_plt_entry_got_slot(&[0xff, 0x25], 0x1000), None);
     }
 
     fn func(name: &str) -> FunctionRef {

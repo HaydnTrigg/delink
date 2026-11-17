@@ -3,8 +3,8 @@
 //! `Binary` borrows from a byte slice (typically an mmap owned by the caller)
 //! so parsing is zero-copy. Holds the parsed ELF plus a `gimli::Dwarf` handle.
 //!
-//! Both ELF classes are accepted: AArch64 shared objects (ELF64) and 32-bit
-//! ARM shared objects (ELF32). The class and architecture are recorded on the
+//! Both ELF classes are accepted: AArch64 and x86-64 shared objects (ELF64)
+//! and 32-bit ARM shared objects (ELF32). The class and architecture are recorded on the
 //! `Binary` so downstream passes can pick the right relocation encoding —
 //! AArch64 uses `SHT_RELA` with explicit addends, ARM uses `SHT_REL` with the
 //! addend stored in the relocated field.
@@ -43,14 +43,14 @@ impl<'a> Binary<'a> {
         }
         let arch = Arch::from_elf_machine(raw.e_machine).ok_or_else(|| {
             Error::Unsupported(format!(
-                "unsupported machine e_machine=0x{:x} (supported: 0xb7 EM_AARCH64, 0x28 EM_ARM)",
+                "unsupported machine e_machine=0x{:x} (supported: 0xb7 EM_AARCH64, 0x28 EM_ARM, 0x3e EM_X86_64)",
                 raw.e_machine
             ))
         })?;
         // AArch64 code in an ELF32 container (ILP32) is not something we
         // generate relocations for; reject rather than mis-encode.
         match (arch, raw.class) {
-            (Arch::Aarch64, ElfClass::Elf64) | (Arch::Arm, ElfClass::Elf32) => {}
+            (Arch::Aarch64 | Arch::X86_64, ElfClass::Elf64) | (Arch::Arm, ElfClass::Elf32) => {}
             (a, c) => {
                 return Err(Error::Unsupported(format!("{a} in an {c} container")));
             }

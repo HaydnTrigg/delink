@@ -123,7 +123,35 @@ pub fn reloc_name(arch: Arch, t: u32) -> String {
     match arch {
         Arch::Aarch64 => aarch64_reloc_name(t),
         Arch::Arm => arm_reloc_name(t),
+        Arch::X86_64 => x86_64_reloc_name(t),
     }
+}
+
+fn x86_64_reloc_name(t: object::elf::RelocationType) -> String {
+    use object::elf::*;
+    let name = match t {
+        R_X86_64_NONE => "R_X86_64_NONE",
+        R_X86_64_64 => "R_X86_64_64",
+        R_X86_64_PC32 => "R_X86_64_PC32",
+        R_X86_64_GOT32 => "R_X86_64_GOT32",
+        R_X86_64_PLT32 => "R_X86_64_PLT32",
+        R_X86_64_COPY => "R_X86_64_COPY",
+        R_X86_64_GLOB_DAT => "R_X86_64_GLOB_DAT",
+        R_X86_64_JUMP_SLOT => "R_X86_64_JUMP_SLOT",
+        R_X86_64_RELATIVE => "R_X86_64_RELATIVE",
+        R_X86_64_GOTPCREL => "R_X86_64_GOTPCREL",
+        R_X86_64_32 => "R_X86_64_32",
+        R_X86_64_32S => "R_X86_64_32S",
+        R_X86_64_DTPMOD64 => "R_X86_64_DTPMOD64",
+        R_X86_64_DTPOFF64 => "R_X86_64_DTPOFF64",
+        R_X86_64_TPOFF64 => "R_X86_64_TPOFF64",
+        R_X86_64_PC64 => "R_X86_64_PC64",
+        R_X86_64_IRELATIVE => "R_X86_64_IRELATIVE",
+        R_X86_64_GOTPCRELX => "R_X86_64_GOTPCRELX",
+        R_X86_64_REX_GOTPCRELX => "R_X86_64_REX_GOTPCRELX",
+        _ => return format!("R_X86_64_{t}"),
+    };
+    name.to_string()
 }
 
 fn arm_reloc_name(t: object::elf::RelocationType) -> String {

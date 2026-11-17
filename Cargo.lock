@@ -265,6 +265,7 @@ dependencies = [
  "delink-arch",
  "delink-arm",
  "delink-core",
+ "delink-x86_64",
  "memmap2",
  "object",
  "rayon",

@@ -82,6 +82,10 @@ pub struct EmitStats {
     pub pool_relocated: usize,
     pub pool_unresolved: usize,
     pub pool_out_of_range: usize,
+    /// x86-64: RIP-relative references seen / left unresolved or dropped
+    /// because the fixup has no ELF encoding.
+    pub rip_refs: usize,
+    pub rip_refs_unresolved: usize,
     pub dwarf_bytes: u64,
 }
 
@@ -101,6 +105,8 @@ impl EmitStats {
         self.pool_relocated += other.pool_relocated;
         self.pool_unresolved += other.pool_unresolved;
         self.pool_out_of_range += other.pool_out_of_range;
+        self.rip_refs += other.rip_refs;
+        self.rip_refs_unresolved += other.rip_refs_unresolved;
         self.dwarf_bytes += other.dwarf_bytes;
     }
 }
@@ -128,7 +134,93 @@ fn object_architecture(arch: Arch) -> Architecture {
     match arch {
         Arch::Aarch64 => Architecture::Aarch64,
         Arch::Arm => Architecture::Arm,
+        Arch::X86_64 => Architecture::X86_64,
     }
+}
+
+/// Adapts the ELF symbol tables to the resolver interface the x86-64 recovery
+/// pass was written against (it predates ELF input and was built for PE).
+///
+/// `image_base` / `in_text` / `resolve_tls_offset` keep their trait defaults:
+/// image-base-relative (RVA) addressing is a PE idiom, and ELF shared objects
+/// reach their data RIP-relatively.
+struct ElfX86Resolver<'a>(&'a GlobalSymbols);
+
+impl delink_x86_64::recover::SymbolResolver for ElfX86Resolver<'_> {
+    fn resolve_code(&self, va: u64) -> Option<(String, i64)> {
+        use delink_core::symbols::ResolvedTarget;
+        match self.0.resolve(va) {
+            ResolvedTarget::Internal(f) => Some((f.export_name().to_string(), 0)),
+            ResolvedTarget::ExternalPlt(name) => Some((name.to_string(), 0)),
+            ResolvedTarget::Unknown => self
+                .0
+                .resolve_into(va)
+                .map(|(f, delta)| (f.export_name().to_string(), delta as i64)),
+        }
+    }
+
+    fn resolve_data(&self, va: u64) -> Option<(String, i64)> {
+        // A `.got` slot is resolved through to what it holds: the imported
+        // symbol it was bound to, or the module-local address it points at.
+        if self.0.in_got(va) {
+            return self.0.resolve_got_slot(va).map(|r| (r.symbol, r.addend));
+        }
+        if let Some(name) = self.0.plt.get(&va) {
+            return Some((name.clone(), 0));
+        }
+        self.0.resolve_data(va).map(|r| (r.symbol, r.addend))
+    }
+}
+
+/// ELF relocation for one recovered x86-64 fixup, as `(r_type, addend)`.
+///
+/// `bytes` is the function's original code and `fn_addr` its address; both are
+/// needed to tell what the 32-bit field is for, because the recovery pass folds
+/// branches, RIP-relative data and GOT loads into one `Rel32` kind. Returns
+/// `None` for a fixup that cannot be expressed (and so is dropped).
+///
+/// ELF `PC32`-style relocations compute `S + A - P` with `P` the address of the
+/// *field*, while RIP-relative operands are relative to the end of the
+/// *instruction*. The recovery pass reports the addend against the target, so
+/// the `4 + trailing` bytes between field and instruction end are folded in.
+fn x86_64_elf_reloc(
+    kind: delink_x86_64::RelocKind,
+    bytes: &[u8],
+    offset: usize,
+    fn_addr: u64,
+    addend: i64,
+    globals: &GlobalSymbols,
+) -> Option<(u32, i64)> {
+    use delink_x86_64::RelocKind;
+    use object::elf::{R_X86_64_GOTPCREL, R_X86_64_PC32, R_X86_64_PLT32};
+
+    let RelocKind::Rel32 { trailing } = kind else {
+        // ADDR32NB / SECREL / ADDR64 are PE-only and never produced for ELF.
+        return None;
+    };
+    let bias = 4 + trailing as i64;
+
+    // E8/E9 (call/jmp rel32) and 0F 8x (jcc rel32) are the only instructions
+    // whose displacement directly follows the opcode. A RIP-relative operand
+    // always has a ModRM byte (mod=00, rm=101) in front, never E8/E9/8x.
+    let is_branch = trailing == 0
+        && (offset >= 1 && matches!(bytes[offset - 1], 0xe8 | 0xe9)
+            || offset >= 2 && bytes[offset - 2] == 0x0f && bytes[offset - 1] & 0xf0 == 0x80);
+    if is_branch {
+        return Some((R_X86_64_PLT32.0, addend - bias));
+    }
+
+    // A load through the GOT (`mov rax, [rip+slot]`, `call [rip+slot]`) names
+    // the slot, so the relocation names the *symbol* and lets the linker build
+    // its own slot. GOTPCREL adds its addend to the slot address, not to the
+    // symbol, so a slot that resolves to `symbol + n` has no encoding.
+    let disp = i32::from_le_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?);
+    let target_va = (fn_addr + offset as u64 + bias as u64).wrapping_add(disp as i64 as u64);
+    if globals.in_got(target_va) {
+        return (addend == 0).then_some((R_X86_64_GOTPCREL.0, -bias));
+    }
+
+    Some((R_X86_64_PC32.0, addend - bias))
 }
 
 /// Recover relocations for one function and produce the exact bytes to emit.
@@ -187,6 +279,36 @@ fn prepare_function(
             stats.pool_relocated = rec.diag.pool_relocated;
             stats.pool_unresolved = rec.diag.pool_unresolved;
             stats.pool_out_of_range = rec.diag.pool_out_of_range;
+        }
+        Arch::X86_64 => {
+            // RELA: the code bytes are copied through untouched and the
+            // addend travels in the relocation.
+            let resolver = ElfX86Resolver(globals);
+            let rec = delink_x86_64::recover(&bytes, fn_addr, fn_size, &resolver)?;
+            let mut dropped = 0usize;
+            for r in &rec.relocs {
+                match x86_64_elf_reloc(
+                    r.kind,
+                    &bytes,
+                    r.offset as usize,
+                    fn_addr,
+                    r.addend,
+                    globals,
+                ) {
+                    Some((r_type, addend)) => relocs.push(PreparedReloc {
+                        offset: r.offset,
+                        r_type,
+                        target: r.target.clone(),
+                        addend,
+                    }),
+                    None => dropped += 1,
+                }
+            }
+            stats.instructions = rec.diag.instructions;
+            stats.decode_failures = rec.diag.decode_failures;
+            stats.unresolved_calls = rec.diag.calls_unresolved;
+            stats.rip_refs = rec.diag.rip_refs_resolved + rec.diag.rip_refs_unresolved;
+            stats.rip_refs_unresolved = rec.diag.rip_refs_unresolved + dropped;
         }
     }
 
@@ -397,6 +519,12 @@ pub fn emit_cu(binary: &Binary<'_>, opts: EmitOptions<'_>, out_path: &Path) -> R
     Ok(agg)
 }
 
+/// The DWARF scanners assume 8-byte `DW_FORM_addr`, so only 64-bit targets can
+/// have relocations synthesised for their debug sections.
+fn dwarf_reloc_synthesis(arch: Arch) -> bool {
+    matches!(arch, Arch::Aarch64 | Arch::X86_64)
+}
+
 fn emit_cu_dwarf(
     obj: &mut Object,
     binary: &Binary<'_>,
@@ -405,16 +533,16 @@ fn emit_cu_dwarf(
     local_syms: &mut HashMap<String, SymbolId>,
     undef_cache: &mut HashMap<String, SymbolId>,
 ) -> Result<()> {
-    if binary.arch != Arch::Aarch64 {
+    let synth = dwarf_reloc_synthesis(binary.arch);
+    if !synth {
         // The DWARF reloc scanner assumes 8-byte `DW_FORM_addr`; on 32-bit
         // targets the slices are copied through unrelocated instead of
         // emitting relocations that would corrupt them.
         tracing::warn!(
             arch = %binary.arch,
-            "DWARF relocation synthesis is AArch64-only; emitting unrelocated slices"
+            "DWARF relocation synthesis needs a 64-bit target; emitting unrelocated slices"
         );
     }
-    let synth = binary.arch == Arch::Aarch64;
 
     let (debug_info_section, debug_info_slice) =
         add_dwarf_slice(obj, binary, ".debug_info", cu.debug_info_range.clone());
@@ -437,7 +565,14 @@ fn emit_cu_dwarf(
         match dwarf_relocs::scan_debug_info(info_slice, abbrev_slice, globals) {
             Ok((recs, _diag)) => {
                 for r in recs {
-                    attach_dwarf_reloc(obj, info_section, local_syms, undef_cache, &r)?;
+                    attach_dwarf_reloc(
+                        obj,
+                        binary.arch,
+                        info_section,
+                        local_syms,
+                        undef_cache,
+                        &r,
+                    )?;
                 }
             }
             Err(e) => tracing::warn!(cu = %cu.name, error = %e, "debug_info scan failed"),
@@ -448,7 +583,14 @@ fn emit_cu_dwarf(
         match dwarf_relocs::scan_debug_line(line_slice, globals) {
             Ok((recs, _diag)) => {
                 for r in recs {
-                    attach_dwarf_reloc(obj, line_section, local_syms, undef_cache, &r)?;
+                    attach_dwarf_reloc(
+                        obj,
+                        binary.arch,
+                        line_section,
+                        local_syms,
+                        undef_cache,
+                        &r,
+                    )?;
                 }
             }
             Err(e) => tracing::warn!(cu = %cu.name, error = %e, "debug_line scan failed"),
@@ -494,22 +636,27 @@ fn dwarf_section_slice<'a>(
 
 fn attach_dwarf_reloc(
     obj: &mut Object,
+    arch: Arch,
     section_id: SectionId,
     local_syms: &mut HashMap<String, SymbolId>,
     undef_cache: &mut HashMap<String, SymbolId>,
     reloc: &dwarf_relocs::DwarfReloc,
 ) -> Result<()> {
+    let (abs64, abs32) = match arch {
+        Arch::X86_64 => (object::elf::R_X86_64_64, object::elf::R_X86_64_32),
+        _ => (object::elf::R_AARCH64_ABS64, object::elf::R_AARCH64_ABS32),
+    };
     let (offset, symbol, addend, r_type) = match reloc {
         dwarf_relocs::DwarfReloc::Abs64 {
             offset,
             symbol,
             addend,
-        } => (*offset, symbol, *addend, object::elf::R_AARCH64_ABS64),
+        } => (*offset, symbol, *addend, abs64),
         dwarf_relocs::DwarfReloc::Abs32 {
             offset,
             symbol,
             addend,
-        } => (*offset, symbol, *addend, object::elf::R_AARCH64_ABS32),
+        } => (*offset, symbol, *addend, abs32),
     };
     let sym_id = resolve_symbol(obj, local_syms, undef_cache, symbol);
     obj.add_relocation(
@@ -785,6 +932,7 @@ pub fn emit_shared_data(
     let ptr_reloc = match arch {
         Arch::Aarch64 => object::elf::R_AARCH64_ABS64,
         Arch::Arm => object::elf::R_ARM_ABS32,
+        Arch::X86_64 => object::elf::R_X86_64_64,
     };
     let all_relocs = read_all_dyn_relocs(binary)?;
     let mut queued: Vec<(usize, u64, String, i64)> = Vec::new();
@@ -863,7 +1011,7 @@ pub fn emit_shared_data(
         obj.append_section_data(slot.section_id, &slot.data, 16);
     }
 
-    if arch == Arch::Aarch64 {
+    if arch != Arch::Arm {
         if let Some(section) = binary.elf.section_by_name(".eh_frame") {
             let data = section.data().context("read .eh_frame")?;
             if !data.is_empty() {
@@ -878,6 +1026,7 @@ pub fn emit_shared_data(
                     section.address(),
                     symbols,
                     &mut undef_cache,
+                    arch,
                 )?;
             }
         }
@@ -1095,7 +1244,7 @@ fn emit_shared_dwarf(
         }
     }
 
-    if binary.arch != Arch::Aarch64 {
+    if !dwarf_reloc_synthesis(binary.arch) {
         // See `emit_cu_dwarf`: the scanners assume 64-bit DWARF addresses.
         return Ok(());
     }
@@ -1104,14 +1253,14 @@ fn emit_shared_dwarf(
     if let Some((sid, data)) = debug_ranges_info {
         let (recs, diag) = dwarf_relocs::scan_debug_ranges(data, ptr_size, symbols);
         for r in recs {
-            attach_dwarf_reloc(obj, sid, &mut HashMap::new(), undef_cache, &r)?;
+            attach_dwarf_reloc(obj, binary.arch, sid, &mut HashMap::new(), undef_cache, &r)?;
         }
         stats.debug_ranges_relocs = diag.range_pairs_resolved;
     }
     if let Some((sid, data)) = debug_loc_info {
         let (recs, diag) = dwarf_relocs::scan_debug_loc(data, ptr_size, symbols);
         for r in recs {
-            attach_dwarf_reloc(obj, sid, &mut HashMap::new(), undef_cache, &r)?;
+            attach_dwarf_reloc(obj, binary.arch, sid, &mut HashMap::new(), undef_cache, &r)?;
         }
         stats.debug_loc_relocs = diag.loc_pairs_resolved;
     }
@@ -1119,8 +1268,9 @@ fn emit_shared_dwarf(
 }
 
 /// Walk `.eh_frame`, find each FDE's `pc_begin` field (assumed `DW_EH_PE_pcrel
-/// | DW_EH_PE_sdata4` — standard on AArch64 ELF), resolve the target function
-/// address to a symbol, and emit an `R_AARCH64_PREL32` relocation at that
+/// | DW_EH_PE_sdata4` — standard on AArch64 and x86-64 ELF), resolve the target
+/// function address to a symbol, and emit a 32-bit PC-relative relocation
+/// (`R_AARCH64_PREL32` / `R_X86_64_PC32`) at that
 /// field so the linker rewrites the offset when the function moves.
 ///
 /// Returns the number of relocations emitted.
@@ -1131,7 +1281,13 @@ fn translate_eh_frame(
     section_vaddr: u64,
     symbols: &GlobalSymbols,
     undef_cache: &mut HashMap<String, SymbolId>,
+    arch: Arch,
 ) -> Result<usize> {
+    // 32-bit PC-relative data relocation for this ABI.
+    let prel32 = match arch {
+        Arch::X86_64 => object::elf::R_X86_64_PC32,
+        _ => object::elf::R_AARCH64_PREL32,
+    };
     let mut cursor = 0usize;
     let mut emitted = 0usize;
 
@@ -1184,9 +1340,7 @@ fn translate_eh_frame(
                         offset: pc_begin_field_off as u64,
                         symbol: sym_id,
                         addend,
-                        flags: RelocationFlags::Elf {
-                            r_type: object::elf::R_AARCH64_PREL32,
-                        },
+                        flags: RelocationFlags::Elf { r_type: prel32 },
                     },
                 )
                 .with_context(|| format!("add FDE pc_begin reloc at {:#x}", pc_begin_field_off))?;
@@ -1224,7 +1378,7 @@ fn fde_resolve_target(symbols: &GlobalSymbols, addr: u64) -> Option<(String, i64
 #[derive(Clone, Copy)]
 enum DynClass {
     Relative,
-    /// Pointer-sized absolute: `R_AARCH64_ABS64` / `R_ARM_ABS32`.
+    /// Pointer-sized absolute: `R_AARCH64_ABS64` / `R_ARM_ABS32` / `R_X86_64_64`.
     Abs,
     GlobDat,
     JumpSlot,
@@ -1246,6 +1400,13 @@ fn classify_dyn_reloc(arch: Arch, rel: &DynReloc) -> DynClass {
             R_ARM_ABS32 | R_ARM_TARGET1 => DynClass::Abs,
             R_ARM_GLOB_DAT => DynClass::GlobDat,
             R_ARM_JUMP_SLOT => DynClass::JumpSlot,
+            _ => DynClass::Other,
+        },
+        Arch::X86_64 => match object::elf::RelocationType(rel.r_type) {
+            R_X86_64_RELATIVE => DynClass::Relative,
+            R_X86_64_64 => DynClass::Abs,
+            R_X86_64_GLOB_DAT => DynClass::GlobDat,
+            R_X86_64_JUMP_SLOT => DynClass::JumpSlot,
             _ => DynClass::Other,
         },
     }
@@ -1380,4 +1541,128 @@ pub fn split_all(
         .collect();
 
     Ok(outcomes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use delink_x86_64::RelocKind;
+    use object::elf::{R_X86_64_GOTPCREL, R_X86_64_PC32, R_X86_64_PLT32};
+    use std::collections::{BTreeMap, HashMap};
+
+    /// Symbol tables with a `.got` at 0x5000..0x5100 and nothing else.
+    fn globals() -> GlobalSymbols {
+        GlobalSymbols {
+            functions: BTreeMap::new(),
+            variables: BTreeMap::new(),
+            plt: HashMap::new(),
+            got: HashMap::new(),
+            got_local: HashMap::new(),
+            plt_range: None,
+            got_range: Some(0x5000..0x5100),
+            text_range: 0x1000..0x2000,
+            rodata_range: None,
+            data_range: None,
+            data_rel_ro_range: None,
+            data_rel_ro_local_range: None,
+            bss_range: None,
+            arch: Arch::X86_64,
+        }
+    }
+
+    #[test]
+    fn calls_and_jumps_become_plt32_with_the_field_bias() {
+        // call rel32 (E8) and jmp rel32 (E9): field at +1, instruction ends 4 later.
+        for opcode in [0xe8u8, 0xe9] {
+            let bytes = [opcode, 0, 0, 0, 0];
+            let got = x86_64_elf_reloc(
+                RelocKind::Rel32 { trailing: 0 },
+                &bytes,
+                1,
+                0x1000,
+                0,
+                &globals(),
+            );
+            assert_eq!(got, Some((R_X86_64_PLT32.0, -4)));
+        }
+        // jcc rel32 (0F 84): field at +2.
+        let bytes = [0x0f, 0x84, 0, 0, 0, 0];
+        let got = x86_64_elf_reloc(
+            RelocKind::Rel32 { trailing: 0 },
+            &bytes,
+            2,
+            0x1000,
+            0x10,
+            &globals(),
+        );
+        assert_eq!(got, Some((R_X86_64_PLT32.0, 0x10 - 4)));
+    }
+
+    #[test]
+    fn rip_relative_data_folds_in_the_trailing_immediate() {
+        // mov byte ptr [rip+disp], imm8 : 1 byte follows the field, so the
+        // instruction ends 5 bytes after it.
+        let bytes = [0xc6, 0x05, 0, 0, 0, 0, 0x01];
+        let got = x86_64_elf_reloc(
+            RelocKind::Rel32 { trailing: 1 },
+            &bytes,
+            2,
+            0x1000,
+            0x20,
+            &globals(),
+        );
+        assert_eq!(got, Some((R_X86_64_PC32.0, 0x20 - 5)));
+
+        // lea rax, [rip+disp]: nothing trailing.
+        let bytes = [0x48, 0x8d, 0x05, 0, 0, 0, 0];
+        let got = x86_64_elf_reloc(
+            RelocKind::Rel32 { trailing: 0 },
+            &bytes,
+            3,
+            0x1000,
+            0,
+            &globals(),
+        );
+        assert_eq!(got, Some((R_X86_64_PC32.0, -4)));
+    }
+
+    #[test]
+    fn got_loads_name_the_symbol_not_the_slot() {
+        // mov rax, [rip+disp] at 0x1000; instruction ends at 0x1007, so a
+        // displacement of 0x3ff9 lands on the slot at 0x5000.
+        let mut bytes = vec![0x48, 0x8b, 0x05];
+        bytes.extend_from_slice(&0x3ff9i32.to_le_bytes());
+        let got = x86_64_elf_reloc(
+            RelocKind::Rel32 { trailing: 0 },
+            &bytes,
+            3,
+            0x1000,
+            0,
+            &globals(),
+        );
+        assert_eq!(got, Some((R_X86_64_GOTPCREL.0, -4)));
+
+        // A slot resolving to `symbol + n` cannot be expressed: GOTPCREL adds
+        // its addend to the slot, not the symbol.
+        let got = x86_64_elf_reloc(
+            RelocKind::Rel32 { trailing: 0 },
+            &bytes,
+            3,
+            0x1000,
+            8,
+            &globals(),
+        );
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn pe_only_kinds_are_dropped() {
+        let bytes = [0u8; 8];
+        for kind in [RelocKind::Addr32Nb, RelocKind::Secrel, RelocKind::Addr64] {
+            assert_eq!(
+                x86_64_elf_reloc(kind, &bytes, 0, 0x1000, 0, &globals()),
+                None
+            );
+        }
+    }
 }
