@@ -77,6 +77,8 @@ impl OutputFormat {
 #[derive(Debug, Default)]
 pub struct EmitStats {
     pub text_bytes: u64,
+    pub data_bytes: u64,
+    pub bss_bytes: u64,
     pub instructions: usize,
     pub local_symbols: usize,
     pub undef_symbols: usize,
@@ -122,13 +124,14 @@ pub fn split_by_groups(
     }
     std::fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
 
+    let items = DataItems::build(groups);
     let group_vec: Vec<(&String, &BTreeMap<String, SymbolDef>)> = groups.iter().collect();
     let outcomes = group_vec
         .par_iter()
         .map(|(file_name, syms)| {
             let file = out_dir.join(file_name.as_str());
-            let result =
-                emit_object(model, pe, symbols, syms, format, &file).map_err(|e| format!("{e:#}"));
+            let result = emit_object(model, pe, symbols, &items, syms, format, &file)
+                .map_err(|e| format!("{e:#}"));
             CuOutcome {
                 cu_name: (*file_name).clone(),
                 file,
@@ -302,23 +305,64 @@ pub fn emit_shared(
 // Per-object emit
 // ---------------------------------------------------------------------------
 
+/// Every entry of the grouping (code and data), by address. An absolute pointer
+/// in data that lands inside one of them is expressed relative to it
+/// (`@TFoo@ + 0x4C` rather than IDA's `VMT_TFoo`), the way a compiler addresses
+/// the pieces it emits. Code keeps IDA's names (its relocations compare by
+/// address).
+pub struct DataItems {
+    by_start: BTreeMap<u64, (u64, String)>,
+}
+
+impl DataItems {
+    pub fn build(groups: &IdaproJson) -> Self {
+        let mut by_start = BTreeMap::new();
+        for syms in groups.values() {
+            for (name, d) in syms {
+                // Code entries too: data can point inside a routine (a thunk block's
+                // interface table) the way it points inside a VMT.
+                if d.bytes.is_some() || d.anonymous || d.size == 0 {
+                    continue;
+                }
+                by_start.insert(d.address, (d.address + d.size, name.clone()));
+            }
+        }
+        Self { by_start }
+    }
+
+    fn containing(&self, va: u64) -> Option<(String, i64)> {
+        let (start, (end, name)) = self.by_start.range(..=va).next_back()?;
+        (va < *end).then(|| (name.clone(), (va - start) as i64))
+    }
+
+    /// Resolve an absolute pointer: a data entry it lands in first, then the
+    /// IDA names.
+    pub fn resolve(&self, symbols: &IdaSymbols, va: u64) -> Option<(String, i64)> {
+        self.containing(va).or_else(|| symbols.resolve_data(va))
+    }
+}
+
 fn emit_object(
     model: &IdaModel,
     pe: &PeImage,
     symbols: &IdaSymbols,
+    items: &DataItems,
     syms: &BTreeMap<String, SymbolDef>,
     format: OutputFormat,
     out_path: &Path,
 ) -> Result<EmitStats> {
+    let text_name = text_name(format);
+    let is_code = |d: &SymbolDef| d.is_code(text_name);
+
     // Order the group's symbols by address; each carries its own va/size/scope.
-    let mut funcs: Vec<(&String, u64, u64, bool)> = syms
+    // Explicit-bytes data has no meaningful address, so keep it after the rest.
+    let mut entries: Vec<(&String, &SymbolDef)> = syms
         .iter()
-        .filter(|(_, d)| d.size > 0)
-        .map(|(n, d)| (n, d.address, d.address + d.size, d.scope.is_global()))
+        .filter(|(_, d)| d.size > 0 || d.bytes.is_some())
         .collect();
-    funcs.sort_by_key(|(_, start, _, _)| *start);
-    if funcs.is_empty() {
-        return Err(anyhow!("group has no resolvable functions"));
+    entries.sort_by_key(|(_, d)| (d.bytes.is_some(), d.address));
+    if entries.is_empty() {
+        return Err(anyhow!("group has no resolvable symbols"));
     }
 
     let (arch, endian) = obj_arch(model);
@@ -326,17 +370,23 @@ fn emit_object(
     if format == OutputFormat::Coff && model.arch == IdaArch::X86 {
         obj.set_mangling(Mangling::Coff);
     }
-    let text_name = text_name(format);
-    let sid = obj.add_section(Vec::new(), text_name.as_bytes().to_vec(), SectionKind::Text);
+    // Sections are created on first use, code first so a pure-code group keeps
+    // its single `.text` section at index 1.
+    let mut sections: HashMap<String, SectionId> = HashMap::new();
+    if entries.iter().any(|(_, d)| is_code(d)) {
+        let sid = obj.add_section(Vec::new(), text_name.as_bytes().to_vec(), SectionKind::Text);
+        sections.insert(text_name.to_string(), sid);
+    }
 
     let mut local: HashMap<String, SymbolId> = HashMap::new();
     let mut undef: HashMap<String, SymbolId> = HashMap::new();
     let mut stats = EmitStats::default();
 
     // Relocations are staged (by target *name*) and emitted in a second pass,
-    // after every function symbol in the group exists, so an intra-object
-    // forward call binds to the local definition rather than a stray undef.
+    // after every symbol in the group exists, so an intra-object reference
+    // binds to the local definition rather than a stray undef.
     struct Pending {
+        sid: SectionId,
         offset: u64,
         sym: String,
         addend: i64,
@@ -344,89 +394,182 @@ fn emit_object(
     }
     let mut pending: Vec<Pending> = Vec::new();
     let rel32 = rel32_flags(format, model.arch);
+    let ptr_size = (model.bits / 8).max(4);
 
-    for (name, start, end, public) in &funcs {
-        let size = end - start;
-        let rva = start.wrapping_sub(model.image_base);
-        let Some(orig) = pe.data_at_rva(rva, size as usize) else {
-            tracing::warn!(
-                "function '{name}' at {start:#x} (rva {rva:#x}) not backed by the input binary; skipping"
-            );
-            continue;
-        };
-        let mut bytes = orig.to_vec();
-        stats.text_bytes += size;
-
-        // 1) iced-x86 recovery → rel32 relocations.
-        let recovered = recover(model, &bytes, *start, size, symbols)?;
-        stats.instructions += recovered.instructions;
-        stats.unresolved_calls += recovered.unresolved_calls;
-        stats.unresolved_rip += recovered.unresolved_rip;
-        for r in &recovered.relocs {
-            let off = r.offset as usize;
-            if off + 4 <= bytes.len() {
-                bytes[off..off + 4].fill(0);
-            }
-        }
-
-        // 2) IDA fixup table → absolute relocations within this function.
-        let mut abs: Vec<(u64, String, i64, RelocationFlags)> = Vec::new();
-        for r in symbols.relocs_in(*start..*end) {
-            let Some(flags) = abs_flags(format, model.arch, r.size) else {
-                continue;
-            };
-            let off = (r.addr - start) as usize;
-            let w = r.size as usize;
-            if off + w > bytes.len() {
-                continue;
-            }
-            if let Some((tname, addend)) = symbols.resolve_data(r.target) {
-                bytes[off..off + w].fill(0);
-                abs.push((off as u64, tname, addend, flags));
-            }
-        }
-
-        let fn_off = obj.append_section_data(sid, &bytes, 1);
-
-        let scope = if *public {
+    for (name, def) in entries {
+        let scope = if def.scope.is_global() {
             SymbolScope::Dynamic
         } else {
             SymbolScope::Compilation
         };
+        let start = def.address;
+        let size = def.size;
+        let rva = start.wrapping_sub(model.image_base);
+
+        if is_code(def) {
+            let sid = sections[text_name];
+            let end = start + size;
+            let Some(orig) = pe.data_at_rva(rva, size as usize) else {
+                tracing::warn!(
+                    "function '{name}' at {start:#x} (rva {rva:#x}) not backed by the input binary; skipping"
+                );
+                continue;
+            };
+            let mut bytes = orig.to_vec();
+            stats.text_bytes += size;
+
+            // 1) iced-x86 recovery â†’ rel32 relocations.
+            let recovered = recover(model, &bytes, start, size, symbols)?;
+            stats.instructions += recovered.instructions;
+            stats.unresolved_calls += recovered.unresolved_calls;
+            stats.unresolved_rip += recovered.unresolved_rip;
+            for r in &recovered.relocs {
+                let off = r.offset as usize;
+                if off + 4 <= bytes.len() {
+                    bytes[off..off + 4].fill(0);
+                }
+            }
+
+            // 2) IDA fixup table â†’ absolute relocations within this function.
+            let mut abs: Vec<(u64, String, i64, RelocationFlags)> = Vec::new();
+            for r in symbols.relocs_in(start..end) {
+                let Some(flags) = abs_flags(format, model.arch, r.size) else {
+                    continue;
+                };
+                let off = (r.addr - start) as usize;
+                let w = r.size as usize;
+                if off + w > bytes.len() {
+                    continue;
+                }
+                if let Some((tname, addend)) = symbols.resolve_data(r.target) {
+                    bytes[off..off + w].fill(0);
+                    abs.push((off as u64, tname, addend, flags));
+                }
+            }
+
+            let fn_off = obj.append_section_data(sid, &bytes, 1);
+            let sym_id = obj.add_symbol(Symbol {
+                name: sanitize_symbol_name(name),
+                value: fn_off,
+                size,
+                kind: SymbolKind::Text,
+                scope,
+                weak: false,
+                section: SymbolSection::Section(sid),
+                flags: SymbolFlags::None,
+            });
+            local.insert(name.clone(), sym_id);
+
+            for (off, tname, addend, flags) in abs {
+                pending.push(Pending {
+                    sid,
+                    offset: fn_off + off,
+                    sym: tname,
+                    addend,
+                    flags,
+                });
+            }
+            for r in &recovered.relocs {
+                pending.push(Pending {
+                    sid,
+                    offset: fn_off + r.offset,
+                    sym: r.target.clone(),
+                    addend: r.addend - REL32_FIELD_BYTES,
+                    flags: rel32,
+                });
+            }
+            continue;
+        }
+
+        // Data symbol.
+        let section_name = def.section.as_deref().unwrap_or_default();
+        let kind = data_section_kind(section_name);
+        let sid = *sections
+            .entry(section_name.to_string())
+            .or_insert_with(|| obj.add_section(Vec::new(), section_name.as_bytes().to_vec(), kind));
+        // Byte alignment by default: COFF symbols carry no size, so readers infer it
+        // from the next symbol, and padding would count as part of the data.
+        let align = def.align.unwrap_or(1).max(1);
+
+        let (value, sym_size) = if kind == SectionKind::UninitializedData {
+            stats.bss_bytes += size;
+            (obj.append_section_bss(sid, size, align), size)
+        } else if let Some(hex) = &def.bytes {
+            let mut bytes = decode_hex(hex).with_context(|| format!("bytes of '{name}'"))?;
+            let flags = abs_flags(format, model.arch, ptr_size)
+                .ok_or_else(|| anyhow!("no absolute relocation of {ptr_size} bytes"))?;
+            let mut rels = Vec::new();
+            for r in def.relocations.iter().flatten() {
+                let off = r.offset as usize;
+                if off + ptr_size as usize > bytes.len() {
+                    return Err(anyhow!("relocation at {off:#x} past the end of '{name}'"));
+                }
+                bytes[off..off + ptr_size as usize].fill(0);
+                rels.push((r.offset, r.symbol.clone(), r.addend));
+            }
+            let off = obj.append_section_data(sid, &bytes, align);
+            for (o, s, a) in rels {
+                pending.push(Pending {
+                    sid,
+                    offset: off + o,
+                    sym: s,
+                    addend: a,
+                    flags,
+                });
+            }
+            stats.data_bytes += bytes.len() as u64;
+            (off, bytes.len() as u64)
+        } else {
+            let mut bytes = read_padded(pe, rva, size as usize);
+            let mut rels = Vec::new();
+            for r in symbols.relocs_in(start..start + size) {
+                let Some(flags) = abs_flags(format, model.arch, r.size) else {
+                    continue;
+                };
+                let off = (r.addr - start) as usize;
+                let w = r.size as usize;
+                if off + w > bytes.len() {
+                    continue;
+                }
+                if let Some((tname, addend)) = items.resolve(symbols, r.target) {
+                    bytes[off..off + w].fill(0);
+                    rels.push((off as u64, tname, addend, flags));
+                }
+            }
+            let off = obj.append_section_data(sid, &bytes, align);
+            for (o, s, a, flags) in rels {
+                pending.push(Pending {
+                    sid,
+                    offset: off + o,
+                    sym: s,
+                    addend: a,
+                    flags,
+                });
+            }
+            stats.data_bytes += size;
+            (off, size)
+        };
+
+        if def.anonymous {
+            continue;
+        }
         let sym_id = obj.add_symbol(Symbol {
             name: sanitize_symbol_name(name),
-            value: fn_off,
-            size,
-            kind: SymbolKind::Text,
+            value,
+            size: sym_size,
+            kind: SymbolKind::Data,
             scope,
             weak: false,
             section: SymbolSection::Section(sid),
             flags: SymbolFlags::None,
         });
-        local.insert((*name).clone(), sym_id);
-
-        for (off, tname, addend, flags) in abs {
-            pending.push(Pending {
-                offset: fn_off + off,
-                sym: tname,
-                addend,
-                flags,
-            });
-        }
-        for r in &recovered.relocs {
-            pending.push(Pending {
-                offset: fn_off + r.offset,
-                sym: r.target.clone(),
-                addend: r.addend - REL32_FIELD_BYTES,
-                flags: rel32,
-            });
-        }
+        local.insert(name.clone(), sym_id);
     }
 
     for p in pending {
         let sym = resolve_symbol(&mut obj, &local, &mut undef, &p.sym, format);
         obj.add_relocation(
-            sid,
+            p.sid,
             Relocation {
                 offset: p.offset,
                 symbol: sym,
@@ -444,6 +587,27 @@ fn emit_object(
     let out = obj.write().context("serialize object")?;
     write_file(out_path, &out)?;
     Ok(stats)
+}
+
+/// Section kind for a data symbol's section name.
+fn data_section_kind(name: &str) -> SectionKind {
+    match name {
+        ".bss" | ".tbss" => SectionKind::UninitializedData,
+        ".rdata" | ".rodata" => SectionKind::ReadOnlyData,
+        ".tls" | ".tdata" => SectionKind::Tls,
+        _ => SectionKind::Data,
+    }
+}
+
+fn decode_hex(s: &str) -> Result<Vec<u8>> {
+    let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    if s.len() % 2 != 0 {
+        return Err(anyhow!("odd number of hex digits"));
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| anyhow!("{e}")))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

@@ -58,6 +58,47 @@ pub struct SymbolDef {
     pub size: u64,
     /// Linkage: global (external) or static (internal).
     pub scope: Scope,
+    /// Output section. Absent (or the text section's name) means code: the bytes
+    /// are disassembled for relocations. Any other name makes a data symbol whose
+    /// bytes are copied with absolute relocations from the fixup table; `.bss`
+    /// (or `.tbss`) reserves `size` bytes of uninitialized data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
+    /// Alignment of a data symbol in its section (default 1, so readers that infer
+    /// sizes from the next symbol see exact sizes; ignored for code).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align: Option<u64>,
+    /// Hex bytes to emit instead of the binary's bytes at `address`, for data the
+    /// binary only holds in another form (a linker-built table, say). The symbol
+    /// then gets only the relocations listed in `relocations`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<String>,
+    /// Relocations for `bytes` (absolute, pointer-sized).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relocations: Option<Vec<DataReloc>>,
+    /// Emit the data without a symbol (the key only names the entry), for
+    /// sections the compiler fills without naming anything.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub anonymous: bool,
+}
+
+impl SymbolDef {
+    /// Whether this entry is code (disassembled into the text section).
+    pub fn is_code(&self, text_name: &str) -> bool {
+        self.section.as_deref().is_none_or(|s| s == text_name)
+    }
+}
+
+/// An absolute relocation inside an explicit-`bytes` data symbol.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataReloc {
+    /// Offset within the symbol's bytes.
+    pub offset: u64,
+    /// Target symbol name.
+    pub symbol: String,
+    /// Added to the target's address.
+    #[serde(default)]
+    pub addend: i64,
 }
 
 /// Build a default grouping: one function per output file (extension `ext`,
@@ -75,6 +116,11 @@ pub fn generate(model: &IdaModel, ext: &str) -> IdaproJson {
                 address: f.start,
                 size: f.size(),
                 scope: Scope::from_public(f.public),
+                section: None,
+                align: None,
+                bytes: None,
+                relocations: None,
+                anonymous: false,
             },
         );
     }
