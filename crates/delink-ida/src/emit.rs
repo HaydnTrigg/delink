@@ -601,7 +601,7 @@ fn data_section_kind(name: &str) -> SectionKind {
 
 fn decode_hex(s: &str) -> Result<Vec<u8>> {
     let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(anyhow!("odd number of hex digits"));
     }
     (0..s.len())

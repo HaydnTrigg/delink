@@ -1101,7 +1101,7 @@ fn emit_arm_unwind(
     let mut bytes = data.to_vec();
     let mut relocs: Vec<(u64, String, i64)> = Vec::new();
 
-    for (i, entry) in data.chunks_exact(8).enumerate() {
+    for (i, entry) in data.as_chunks::<8>().0.iter().enumerate() {
         let entry_off = (i * 8) as u64;
         let word0 = u32::from_le_bytes(entry[0..4].try_into().unwrap());
         let word1 = u32::from_le_bytes(entry[4..8].try_into().unwrap());

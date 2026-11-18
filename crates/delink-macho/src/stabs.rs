@@ -241,7 +241,7 @@ fn find_symtab(data: &[u8], le: bool) -> Option<(Vec<Nl>, &[u8])> {
     };
 
     let mut syms = Vec::with_capacity(nsyms as usize);
-    for chunk in sym_data.chunks_exact(12) {
+    for chunk in sym_data.as_chunks::<12>().0 {
         let ntype = chunk[4];
         // Only keep STABS entries (even values ≥ 0x20, no N_EXT / N_PEXT bits).
         if ntype < 0x20 || ntype & 1 != 0 {

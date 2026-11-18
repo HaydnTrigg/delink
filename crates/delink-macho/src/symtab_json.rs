@@ -160,7 +160,7 @@ fn parse_text_symbols(data: &[u8]) -> Vec<ParsedSym> {
     }
     let mut raw: Vec<Raw> = Vec::new();
 
-    for chunk in sym_data.chunks_exact(12) {
+    for chunk in sym_data.as_chunks::<12>().0 {
         let n_type = chunk[4];
         let n_sect = chunk[5];
         if n_type & N_STAB_MASK != 0 {

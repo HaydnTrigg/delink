@@ -488,7 +488,9 @@ fn read_pdata(sections: &[PeSection], image_base: u64) -> HashMap<u64, u64> {
     };
     pdata
         .data
-        .chunks_exact(12)
+        .as_chunks::<12>()
+        .0
+        .iter()
         .filter_map(|e| {
             let begin = u32::from_le_bytes(e[0..4].try_into().unwrap()) as u64;
             let end = u32::from_le_bytes(e[4..8].try_into().unwrap()) as u64;

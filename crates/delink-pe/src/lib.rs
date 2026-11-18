@@ -415,8 +415,8 @@ fn parse_base_relocations(sections: &[PeSection], image_base: u64) -> Vec<BaseRe
         }
 
         let entries = &data[offset + 8..entries_end];
-        for chunk in entries.chunks_exact(2) {
-            let type_offset = u16::from_le_bytes(chunk.try_into().unwrap());
+        for &chunk in entries.as_chunks::<2>().0 {
+            let type_offset = u16::from_le_bytes(chunk);
             let reloc_type = (type_offset >> 12) as u8;
             let page_offset = (type_offset & 0x0FFF) as u64;
 
