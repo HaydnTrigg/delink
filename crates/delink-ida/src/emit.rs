@@ -378,6 +378,18 @@ fn emit_object(
         sections.insert(text_name.to_string(), sid);
     }
 
+    // The group's own named data, per output section, for references from its
+    // code that land just before one of them (see `biased_own_data`).
+    let own_data: Vec<(u64, u64, String, String)> = syms
+        .iter()
+        .filter(|(_, d)| !is_code(d) && d.bytes.is_none() && d.size > 0)
+        .filter_map(|(n, d)| {
+            d.section
+                .clone()
+                .map(|s| (d.address, d.address + d.size, s, n.clone()))
+        })
+        .collect();
+
     let mut local: HashMap<String, SymbolId> = HashMap::new();
     let mut undef: HashMap<String, SymbolId> = HashMap::new();
     let mut stats = EmitStats::default();
@@ -442,6 +454,8 @@ fn emit_object(
                     continue;
                 }
                 if let Some((tname, addend)) = symbols.resolve_data(r.target) {
+                    let (tname, addend) =
+                        biased_own_data(symbols, &own_data, r.target).unwrap_or((tname, addend));
                     bytes[off..off + w].fill(0);
                     abs.push((off as u64, tname, addend, flags));
                 }
@@ -590,6 +604,35 @@ fn emit_object(
 }
 
 /// Section kind for a data symbol's section name.
+/// How far before its own data an index-biased reference may land.
+const MAX_INDEX_BIAS: u64 = 0x1000;
+
+/// A reference from an object's code to an unnamed address in the data section
+/// that lands a little before one of the object's own data symbols is that
+/// symbol with a negative addend: an array whose index range does not start at
+/// 0 (Pascal `array[57..78]`, C `p = table - 1`). The compiler writes it
+/// relative to its own data, so the target object must too; resolved by
+/// address it would land in whichever object happens to precede (or in an
+/// IDA data extent there), and the two sides could not pair. Units do not
+/// address each other's data directly (that goes through import cells or
+/// names), which is what makes the own symbol the right one.
+fn biased_own_data(
+    symbols: &IdaSymbols,
+    own: &[(u64, u64, String, String)],
+    va: u64,
+) -> Option<(String, i64)> {
+    if symbols.has_name(va)
+        || !symbols.in_data(va)
+        || own.iter().any(|(s, e, _, _)| (*s..*e).contains(&va))
+    {
+        return None;
+    }
+    own.iter()
+        .filter(|(start, _, s, _)| s == ".data" && *start > va && *start - va <= MAX_INDEX_BIAS)
+        .min_by_key(|(start, _, _, _)| *start)
+        .map(|(start, _, _, name)| (name.clone(), va as i64 - *start as i64))
+}
+
 fn data_section_kind(name: &str) -> SectionKind {
     match name {
         ".bss" | ".tbss" => SectionKind::UninitializedData,

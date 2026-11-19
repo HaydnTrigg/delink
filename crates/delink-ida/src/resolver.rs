@@ -143,6 +143,16 @@ impl IdaSymbols {
         self.section_relative(va)
     }
 
+    /// Whether `va` carries a name of its own (a function or a named label).
+    pub fn has_name(&self, va: u64) -> bool {
+        self.names.contains_key(&va)
+    }
+
+    /// Whether `va` lies in the initialized data section.
+    pub fn in_data(&self, va: u64) -> bool {
+        self.data_range.as_ref().is_some_and(|r| r.contains(&va))
+    }
+
     fn section_relative(&self, va: u64) -> Option<(String, i64)> {
         let check = |range: &Option<Range<u64>>, sym: &'static str| {
             range.as_ref().and_then(|r| {
