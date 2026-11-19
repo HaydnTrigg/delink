@@ -545,7 +545,9 @@ fn emit_object(
                 if off + w > bytes.len() {
                     continue;
                 }
-                if let Some((tname, addend)) = items.resolve(symbols, r.target) {
+                if let Some((tname, addend)) =
+                    own_containing(&own_data, r.target).or_else(|| items.resolve(symbols, r.target))
+                {
                     bytes[off..off + w].fill(0);
                     rels.push((off as u64, tname, addend, flags));
                 }
@@ -631,6 +633,19 @@ fn biased_own_data(
         .filter(|(start, _, s, _)| s == ".data" && *start > va && *start - va <= MAX_INDEX_BIAS)
         .min_by_key(|(start, _, _, _)| *start)
         .map(|(start, _, _, name)| (name.clone(), va as i64 - *start as i64))
+}
+
+/// The object's own data piece a pointer in its data lands in (the innermost
+/// one). Two objects can both hold the bytes at an address under different
+/// names (a merged unit's copy of another unit's table), and the address's
+/// global name may be one this object defines for something else (an import
+/// cell named after the variable it points to); resolved globally, the
+/// pointer would bind to that local definition.
+fn own_containing(own: &[(u64, u64, String, String)], va: u64) -> Option<(String, i64)> {
+    own.iter()
+        .filter(|(s, e, _, _)| (*s..*e).contains(&va))
+        .max_by_key(|(s, _, _, _)| *s)
+        .map(|(s, _, _, name)| (name.clone(), (va - s) as i64))
 }
 
 fn data_section_kind(name: &str) -> SectionKind {
